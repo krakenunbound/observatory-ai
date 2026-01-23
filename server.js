@@ -1,10 +1,12 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const INDISimulator = require('./src/indi-simulator');
+const INDIWrapper = require('./src/indi-wrapper');
 const { TARGETS, calculateAltAz, findImagingWindow, suggestParameters } = require('./src/targets');
 
 const PORT = 8092;
+const INDI_HOST = process.env.INDI_HOST || 'localhost';
+const INDI_PORT = parseInt(process.env.INDI_PORT || '7624');
 
 // Observatory location (update with actual coordinates)
 const OBSERVATORY = {
@@ -14,9 +16,9 @@ const OBSERVATORY = {
     elevation: 1000
 };
 
-// Initialize simulator
-const indi = new INDISimulator();
-indi.startWeatherSimulation();
+// Initialize INDI wrapper (will auto-detect real INDI or fall back to simulation)
+const indi = new INDIWrapper({ host: INDI_HOST, port: INDI_PORT });
+let indiMode = 'initializing';
 
 // Session state
 let currentSession = {
@@ -649,6 +651,16 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    if (url.pathname === '/api/mode') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            mode: indiMode,
+            host: INDI_HOST,
+            port: INDI_PORT
+        }));
+        return;
+    }
+
     if (url.pathname === '/api/plan') {
         const target = url.searchParams.get('target');
         const result = planSession(target);
@@ -691,8 +703,23 @@ const server = http.createServer(async (req, res) => {
     res.end('Not found');
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Observatory AI Control: http://0.0.0.0:${PORT}`);
-    log('Observatory AI Control system started');
-    log('SIMULATION MODE - Connect to real INDI server when at observatory');
-});
+// Initialize INDI and start server
+async function startServer() {
+    try {
+        const initResult = await indi.init();
+        indiMode = initResult.mode;
+        log(`Observatory AI Control system started`);
+        log(`INDI Mode: ${indiMode.toUpperCase()}`);
+        log(`Devices: ${initResult.devices.join(', ')}`);
+    } catch (err) {
+        log(`INDI initialization error: ${err.message}`);
+        indiMode = 'error';
+    }
+
+    server.listen(PORT, '0.0.0.0', () => {
+        console.log(`Observatory AI Control: http://0.0.0.0:${PORT}`);
+        console.log(`INDI Mode: ${indiMode}`);
+    });
+}
+
+startServer();
