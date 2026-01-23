@@ -3,3 +3,6 @@ tools/
 test-images/
 *.deb
 *.tar.xz
+astap-source/
+star_databases/
+*.zip
