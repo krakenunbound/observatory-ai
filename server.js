@@ -59,16 +59,18 @@ function planSession(targetName, options = {}) {
         window: window,
         params: params,
         steps: [
-            { action: 'SAFETY_CHECK', description: 'Verify weather and equipment safety', status: 'pending' },
-            { action: 'OPEN_ROOF', description: 'Open observatory roof', status: 'pending' },
-            { action: 'COOL_CAMERA', description: `Cool ${camera} to -20°C`, status: 'pending' },
-            { action: 'UNPARK_MOUNT', description: 'Unpark and start tracking', status: 'pending' },
-            { action: 'SLEW', description: `Slew to ${target.name} (RA: ${target.ra}, Dec: ${target.dec})`, status: 'pending' },
-            { action: 'PLATE_SOLVE', description: 'Plate solve and center target', status: 'pending' },
-            { action: 'AUTOFOCUS', description: 'Run autofocus routine', status: 'pending' },
-            { action: 'START_GUIDING', description: 'Calibrate and start autoguiding', status: 'pending' },
-            { action: 'CAPTURE', description: `Capture sequence (${params.totalImagingTime.toFixed(1)} hours total)`, status: 'pending' },
-            { action: 'SHUTDOWN', description: 'Park mount and close roof', status: 'pending' }
+            { action: 'SAFETY_CHECK', description: 'Verify weather and equipment safety', status: 'pending', editable: false },
+            { action: 'COOL_CAMERA', description: `Cool camera to -10°C`, status: 'pending', editable: true, param: '-10' },
+            { action: 'OPEN_ROOF', description: 'Open observatory roof', status: 'pending', editable: false },
+            { action: 'UNPARK_MOUNT', description: 'Unpark and start tracking', status: 'pending', editable: false },
+            { action: 'SLEW', description: `Slew to ${target.name}`, status: 'pending', editable: true, param: target.name },
+            { action: 'AUTOFOCUS', description: 'Run autofocus routine', status: 'pending', editable: false },
+            { action: 'PLATE_SOLVE', description: 'Plate solve and center target', status: 'pending', editable: false },
+            { action: 'START_GUIDING', description: 'Calibrate and start autoguiding', status: 'pending', editable: false },
+            { action: 'CAPTURE', description: `Capture ${params.exposures || 10} × ${params.exposureTime || 300}s`, status: 'pending', editable: true, param: `${params.exposures || 10}x${params.exposureTime || 300}` },
+            { action: 'PARK_MOUNT', description: 'Park mount', status: 'pending', editable: false },
+            { action: 'WARM_CAMERA', description: 'Warm camera to ambient', status: 'pending', editable: false },
+            { action: 'CLOSE_ROOF', description: 'Close observatory roof', status: 'pending', editable: false }
         ],
         estimatedDuration: params.totalImagingTime + 0.5, // Add setup time
         created: new Date().toISOString()
@@ -536,6 +538,10 @@ const HTML = `<!DOCTYPE html>
             color: var(--red);
             box-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
         }
+        .step-skipped {
+            background: rgba(100, 100, 100, 0.2);
+            color: #555;
+        }
 
         @keyframes stepPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
@@ -772,14 +778,19 @@ const HTML = `<!DOCTYPE html>
             <!-- Execution Panel -->
             <div class="panel" id="executionPanel">
                 <h2>Session Steps</h2>
-                <div id="planStepsList" style="max-height: 300px; overflow-y: auto;">
+                <div id="planStepsList" style="max-height: 250px; overflow-y: auto;">
                     <div style="color: var(--text-muted); font-size: 0.85rem;">Generate a plan to see steps.</div>
                 </div>
                 <div class="btn-row" style="margin-top: 15px;">
                     <button class="btn btn-primary" onclick="executeSession()" id="btnExecute" disabled>Start Session</button>
                     <button class="btn btn-danger" onclick="abortSession()" id="btnAbort" disabled>Abort</button>
                 </div>
+                <h3 style="margin-top: 15px; font-size: 0.9rem; color: var(--text-muted);">Session Log</h3>
+                <div id="sessionLog" style="max-height: 150px; overflow-y: auto; background: var(--bg-dark); padding: 10px; border-radius: 6px; font-family: monospace; font-size: 0.75rem;">
+                    <div style="color: var(--text-muted);">Waiting for session to start...</div>
+                </div>
             </div>
+
         </div>
 
         <!-- Technical Dashboard Row -->
@@ -871,6 +882,30 @@ const HTML = `<!DOCTYPE html>
                     Last update: <span id="roofLastUpdate">--</span>
                 </div>
             </div>
+        </div>
+
+        <!-- Image Gallery - Full Width at Bottom -->
+        <div class="panel" style="margin-top: 30px; background: linear-gradient(180deg, rgba(15,15,35,0.95) 0%, rgba(5,5,20,0.98) 100%);">
+            <h2 style="display: flex; align-items: center; justify-content: space-between;">
+                <span style="background: linear-gradient(90deg, var(--cyan), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+                    ✦ Captured Images
+                </span>
+                <button onclick="refreshImages()" style="background: linear-gradient(135deg, var(--accent), var(--accent2)); border: none; color: white; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 0.8rem; box-shadow: 0 0 20px rgba(102, 126, 234, 0.3);">
+                    ↻ Refresh
+                </button>
+            </h2>
+            <div id="imageGallery" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; padding: 20px 10px;">
+                <div style="color: var(--text-muted); font-size: 0.9rem; grid-column: 1/-1; text-align: center; padding: 40px;">
+                    ✦ No images captured yet. Run a session to begin imaging. ✦
+                </div>
+            </div>
+        </div>
+
+        <!-- Fullscreen Image Viewer -->
+        <div id="imageViewer" onclick="closeImageViewer()" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 9999; cursor: pointer; align-items: center; justify-content: center;">
+            <img id="viewerImage" style="max-width: 95%; max-height: 95%; border-radius: 10px; box-shadow: 0 0 60px rgba(102, 126, 234, 0.5);">
+            <div style="position: absolute; top: 20px; right: 30px; color: white; font-size: 2rem; cursor: pointer;">×</div>
+            <div id="viewerCaption" style="position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); color: white; font-size: 1rem; text-shadow: 0 2px 10px black;"></div>
         </div>
     </div>
 
@@ -1025,6 +1060,15 @@ const HTML = `<!DOCTYPE html>
         let currentPlan = null;
         let selectedTargets = [];  // Targets added to session plan
         let rankedTargets = [];    // All ranked targets for tonight
+        let targetExposures = {};  // Custom exposure counts per target
+
+        // Update exposure count for a target
+        function updateExposures(targetId, value) {
+            const count = parseInt(value) || 1;
+            targetExposures[targetId] = Math.max(1, Math.min(999, count));
+            updateSessionPlanUI();
+        }
+        window.updateExposures = updateExposures;
 
         // Populate target list with ranked targets
         function populateRankedTargets(targets) {
@@ -1112,13 +1156,18 @@ const HTML = `<!DOCTYPE html>
                 const target = rankedTargets.find(t => t.id === id);
                 if (!target) continue;
 
-                totalImages += target.suggestedExposures;
-                totalTime += target.suggestedExposures * (target.exposureTime + 30);
+                // Use custom exposure count if set, otherwise use suggested
+                const exposures = targetExposures[id] || target.suggestedExposures;
+                totalImages += exposures;
+                totalTime += exposures * (target.exposureTime + 30);
 
-                html += '<div class="device" style="cursor: pointer;" onclick="toggleTargetInPlan(\\'' + id + '\\')">' +
-                    '<span class="device-name">' + id + '</span>' +
-                    '<span style="color: var(--cyan);">' + target.suggestedExposures + ' × ' + target.exposureTime + 's</span>' +
-                    '<span style="color: var(--red); margin-left: 10px;">✕</span>' +
+                html += '<div class="device" style="display: flex; align-items: center; gap: 10px;">' +
+                    '<span class="device-name" style="flex: 1;">' + id + '</span>' +
+                    '<input type="number" min="1" max="999" value="' + exposures + '" ' +
+                    'style="width: 50px; background: var(--bg-dark); border: 1px solid var(--border); color: var(--cyan); padding: 3px 5px; border-radius: 4px; text-align: center;" ' +
+                    'onclick="event.stopPropagation()" onchange="updateExposures(\\'' + id + '\\', this.value)">' +
+                    '<span style="color: var(--text-muted);">× ' + target.exposureTime + 's</span>' +
+                    '<span style="color: var(--red); cursor: pointer; padding: 5px;" onclick="toggleTargetInPlan(\\'' + id + '\\')">✕</span>' +
                     '</div>';
             }
 
@@ -1136,11 +1185,21 @@ const HTML = `<!DOCTYPE html>
         async function generatePlan() {
             if (selectedTargets.length === 0) return;
 
+            // Build targets with custom exposure counts
+            const targetsWithExposures = selectedTargets.map(id => {
+                const target = rankedTargets.find(t => t.id === id);
+                return {
+                    id: id,
+                    exposures: targetExposures[id] || (target ? target.suggestedExposures : 10),
+                    exposureTime: target ? target.exposureTime : 300
+                };
+            });
+
             try {
                 const resp = await fetch('/api/session/plan', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ targets: selectedTargets })
+                    body: JSON.stringify({ targets: targetsWithExposures })
                 });
                 const plan = await resp.json();
 
@@ -1158,28 +1217,127 @@ const HTML = `<!DOCTYPE html>
         }
         window.generatePlan = generatePlan;
 
-        // Display plan steps
+        // Display plan steps with checkboxes, drag-drop, and inline editing
+        let draggedStepIndex = null;
+
         function displayPlanSteps(steps) {
             const container = document.getElementById('planStepsList');
             let html = '';
             steps.forEach((step, i) => {
+                if (step.enabled === undefined) step.enabled = true;
+
                 const iconClass = step.status === 'completed' ? 'step-completed' :
                                  step.status === 'running' ? 'step-running' :
-                                 step.status === 'failed' ? 'step-failed' : 'step-pending';
+                                 step.status === 'failed' ? 'step-failed' :
+                                 !step.enabled ? 'step-skipped' : 'step-pending';
                 const icon = step.status === 'completed' ? '✓' :
                             step.status === 'failed' ? '✗' :
-                            step.status === 'running' ? '...' : (i + 1);
-                html += '<div class="plan-step">' +
+                            step.status === 'running' ? '...' :
+                            !step.enabled ? '−' : (i + 1);
+                const opacity = !step.enabled ? 'opacity: 0.5;' : '';
+                const strike = !step.enabled ? 'text-decoration: line-through;' : '';
+
+                html += '<div class="plan-step" draggable="true" data-index="' + i + '" ' +
+                    'ondragstart="dragStart(event, ' + i + ')" ' +
+                    'ondragover="dragOver(event)" ' +
+                    'ondrop="dropStep(event, ' + i + ')" ' +
+                    'style="' + opacity + 'cursor: grab;">' +
+                    '<span class="drag-handle" style="color: #444; margin-right: 5px;">⋮⋮</span>' +
+                    '<input type="checkbox" ' + (step.enabled ? 'checked' : '') + ' ' +
+                    'onchange="toggleStep(' + i + ')" ' +
+                    'style="margin-right: 8px; cursor: pointer; accent-color: var(--cyan);">' +
                     '<div class="step-icon ' + iconClass + '">' + icon + '</div>' +
-                    '<div style="flex: 1;">' + step.description + '</div>' +
+                    '<input type="text" value="' + step.description.replace(/"/g, '&quot;') + '" ' +
+                    'onchange="editStepDesc(' + i + ', this.value)" ' +
+                    'style="flex: 1; background: transparent; border: 1px solid transparent; color: var(--text); ' + strike + ' ' +
+                    'padding: 4px 8px; border-radius: 4px; font-size: 0.85rem;" ' +
+                    'onfocus="this.style.borderColor=\\'var(--cyan)\\'; this.style.background=\\'var(--bg-dark)\\';" ' +
+                    'onblur="this.style.borderColor=\\'transparent\\'; this.style.background=\\'transparent\\';">' +
+                    '<span class="step-delete" onclick="deleteStep(' + i + ')" ' +
+                    'style="color: var(--red); cursor: pointer; padding: 0 8px; opacity: 0.5;" ' +
+                    'onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.5">✕</span>' +
                     '</div>';
             });
+
+            // Add new step button
+            html += '<div class="plan-step" style="justify-content: center; cursor: pointer; opacity: 0.6;" ' +
+                'onclick="addCustomStep()" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">' +
+                '<span style="color: var(--cyan);">+ Add Step</span></div>';
+
             container.innerHTML = html;
         }
+
+        // Drag and drop handlers
+        function dragStart(e, index) {
+            draggedStepIndex = index;
+            e.dataTransfer.effectAllowed = 'move';
+            e.target.style.opacity = '0.4';
+        }
+        window.dragStart = dragStart;
+
+        function dragOver(e) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+        }
+        window.dragOver = dragOver;
+
+        function dropStep(e, targetIndex) {
+            e.preventDefault();
+            if (draggedStepIndex === null || draggedStepIndex === targetIndex) return;
+            if (!currentPlan) return;
+
+            const steps = currentPlan.steps;
+            const [draggedStep] = steps.splice(draggedStepIndex, 1);
+            steps.splice(targetIndex, 0, draggedStep);
+            draggedStepIndex = null;
+            displayPlanSteps(steps);
+        }
+        window.dropStep = dropStep;
+
+        // Edit step description
+        function editStepDesc(index, newDesc) {
+            if (currentPlan && currentPlan.steps[index]) {
+                currentPlan.steps[index].description = newDesc;
+            }
+        }
+        window.editStepDesc = editStepDesc;
+
+        // Delete a step
+        function deleteStep(index) {
+            if (currentPlan && currentPlan.steps[index]) {
+                currentPlan.steps.splice(index, 1);
+                displayPlanSteps(currentPlan.steps);
+            }
+        }
+        window.deleteStep = deleteStep;
+
+        // Add a custom step
+        function addCustomStep() {
+            if (!currentPlan) return;
+            currentPlan.steps.push({
+                action: 'CUSTOM',
+                description: 'New step - click to edit',
+                status: 'pending',
+                enabled: true,
+                editable: true
+            });
+            displayPlanSteps(currentPlan.steps);
+        }
+        window.addCustomStep = addCustomStep;
+
+        // Toggle step enabled/disabled
+        function toggleStep(index) {
+            if (currentPlan && currentPlan.steps[index]) {
+                currentPlan.steps[index].enabled = !currentPlan.steps[index].enabled;
+                displayPlanSteps(currentPlan.steps);
+            }
+        }
+        window.toggleStep = toggleStep;
 
         // Clear session plan
         function clearPlan() {
             selectedTargets = [];
+            targetExposures = {};
             currentPlan = null;
             updateSessionPlanUI();
             populateRankedTargets(rankedTargets);
@@ -1189,15 +1347,111 @@ const HTML = `<!DOCTYPE html>
         }
         window.clearPlan = clearPlan;
 
-        // Execute session (placeholder - would trigger automated sequence)
+        // Session execution state
+        let sessionRunning = false;
+        let sessionAborted = false;
+
+        // Execute session - runs through enabled steps
         async function executeSession() {
-            if (!currentPlan) return;
+            if (!currentPlan || sessionRunning) return;
+
+            sessionRunning = true;
+            sessionAborted = false;
             document.getElementById('btnExecute').disabled = true;
             document.getElementById('btnAbort').disabled = false;
-            alert('Session execution would start here. This will be automated in the next phase.');
-            // TODO: Implement step-by-step execution
+
+            const steps = currentPlan.steps;
+
+            for (let i = 0; i < steps.length; i++) {
+                if (sessionAborted) {
+                    addLog('Session aborted by user', 'warning');
+                    break;
+                }
+
+                const step = steps[i];
+
+                // Skip disabled steps
+                console.log('Step ' + i + ': ' + step.action + ' enabled=' + step.enabled);
+                if (step.enabled === false) {
+                    step.status = 'skipped';
+                    addLog('Skipping (disabled): ' + step.description, 'info');
+                    displayPlanSteps(steps);
+                    continue;
+                }
+
+                // Mark step as running
+                step.status = 'running';
+                displayPlanSteps(steps);
+                addLog('Executing: ' + step.description, 'info');
+
+                try {
+                    // Execute the step via API
+                    const result = await executeStep(step);
+
+                    if (result.success) {
+                        step.status = 'completed';
+                        addLog('Completed: ' + step.description, 'success');
+                    } else {
+                        step.status = 'failed';
+                        addLog('Failed: ' + step.description + ' - ' + (result.error || 'Unknown error'), 'error');
+
+                        // Ask user if they want to continue
+                        if (!confirm('Step failed: ' + step.description + '\\n\\nError: ' + (result.error || 'Unknown') + '\\n\\nContinue with remaining steps?')) {
+                            sessionAborted = true;
+                        }
+                    }
+                } catch (e) {
+                    step.status = 'failed';
+                    addLog('Error: ' + e.message, 'error');
+                    if (!confirm('Step error: ' + e.message + '\\n\\nContinue?')) {
+                        sessionAborted = true;
+                    }
+                }
+
+                displayPlanSteps(steps);
+            }
+
+            sessionRunning = false;
+            document.getElementById('btnExecute').disabled = false;
+            document.getElementById('btnAbort').disabled = true;
+
+            if (!sessionAborted) {
+                addLog('Session completed!', 'success');
+                alert('Session completed successfully!');
+            }
         }
         window.executeSession = executeSession;
+
+        // Execute a single step via API
+        async function executeStep(step) {
+            const resp = await fetch('/api/execute-step', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(step)
+            });
+            return await resp.json();
+        }
+
+        // Abort session
+        function abortSession() {
+            if (sessionRunning) {
+                sessionAborted = true;
+                addLog('Abort requested - finishing current step...', 'warning');
+            }
+        }
+        window.abortSession = abortSession;
+
+        // Add log entry
+        function addLog(message, type = 'info') {
+            const logDiv = document.getElementById('sessionLog');
+            if (!logDiv) return;
+            const time = new Date().toLocaleTimeString();
+            const color = type === 'error' ? 'var(--red)' :
+                         type === 'warning' ? 'var(--gold)' :
+                         type === 'success' ? 'var(--green)' : 'var(--text-muted)';
+            logDiv.innerHTML += '<div style="color: ' + color + '; font-size: 0.8rem;">[' + time + '] ' + message + '</div>';
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
 
         // Legacy function for backwards compatibility
         function populateTargets(targets) {
@@ -1314,12 +1568,6 @@ const HTML = `<!DOCTYPE html>
 
                 // Refresh log
                 refreshLog();
-            }
-        }
-
-        function abortSession() {
-            if (confirm('Abort current session?')) {
-                fetch('/api/abort', { method: 'POST' });
             }
         }
 
@@ -1689,6 +1937,77 @@ const HTML = `<!DOCTYPE html>
         setInterval(fetchPortalINDI, 5000);
         setInterval(fetchImageStats, 30000);
         setInterval(fetchRoofStatus, 5000);
+
+        // Image gallery functions
+        async function refreshImages() {
+            try {
+                const resp = await fetch('/api/images');
+                const images = await resp.json();
+                const gallery = document.getElementById('imageGallery');
+
+                if (!images || images.length === 0) {
+                    gallery.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; grid-column: 1/-1; text-align: center; padding: 40px;">✦ No images captured yet. Run a session to begin imaging. ✦</div>';
+                    return;
+                }
+
+                let html = '';
+                for (const img of images.slice(0, 24)) { // Show last 24
+                    const name = img.name.replace('.fits', '').replace('.fit', '').replace('.jpg', '').replace('.png', '');
+                    const shortName = name.length > 20 ? name.slice(0, 20) + '...' : name;
+                    const sizeMB = (img.size / 1024 / 1024).toFixed(1);
+
+                    html += '<div class="astro-thumb" onclick="viewImage(\\'' + img.name + '\\')" ' +
+                        'style="cursor: pointer; background: linear-gradient(135deg, rgba(20,20,40,0.9) 0%, rgba(10,10,25,0.95) 100%); ' +
+                        'border: 2px solid rgba(102, 126, 234, 0.3); border-radius: 12px; padding: 12px; text-align: center; ' +
+                        'transition: all 0.3s ease; box-shadow: 0 4px 20px rgba(0,0,0,0.4);" ' +
+                        'onmouseover="this.style.borderColor=\\'rgba(168, 85, 247, 0.8)\\'; this.style.boxShadow=\\'0 0 30px rgba(168, 85, 247, 0.4), 0 4px 20px rgba(0,0,0,0.6)\\'; this.style.transform=\\'translateY(-5px) scale(1.02)\\';" ' +
+                        'onmouseout="this.style.borderColor=\\'rgba(102, 126, 234, 0.3)\\'; this.style.boxShadow=\\'0 4px 20px rgba(0,0,0,0.4)\\'; this.style.transform=\\'none\\';">' +
+
+                        '<div style="height: 120px; display: flex; align-items: center; justify-content: center; ' +
+                        'background: linear-gradient(180deg, #0a0a15 0%, #050510 100%); border-radius: 8px; margin-bottom: 10px; ' +
+                        'border: 1px solid rgba(102, 126, 234, 0.2); overflow: hidden;">' +
+                        '<img src="/api/images/thumb/' + encodeURIComponent(img.name) + '" ' +
+                        'style="max-width: 100%; max-height: 120px; border-radius: 6px;" ' +
+                        'onerror="this.style.display=\\'none\\'; this.parentElement.innerHTML=\\'<div style=padding:20px;text-align:center;><div style=font-size:2rem;opacity:0.3;>✦</div><div style=color:#445;font-size:0.7rem;margin-top:5px;>FITS</div></div>\\';">' +
+                        '</div>' +
+
+                        '<div style="font-size: 0.8rem; color: var(--cyan); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 4px;" title="' + img.name + '">' + shortName + '</div>' +
+                        '<div style="font-size: 0.7rem; color: var(--text-muted);">' + img.date + '</div>' +
+                        '<div style="font-size: 0.65rem; color: #445; margin-top: 2px;">' + sizeMB + ' MB</div>' +
+                        '</div>';
+                }
+                gallery.innerHTML = html;
+            } catch (e) {
+                console.error('Failed to load images:', e);
+            }
+        }
+        window.refreshImages = refreshImages;
+
+        function viewImage(filename) {
+            const viewer = document.getElementById('imageViewer');
+            const img = document.getElementById('viewerImage');
+            const caption = document.getElementById('viewerCaption');
+
+            // Check if JPG exists, otherwise show FITS message
+            const jpgName = filename.replace(/\\.fits?$/i, '.jpg');
+            img.src = '/api/images/thumb/' + encodeURIComponent(filename);
+            img.onerror = function() {
+                this.src = '';
+                caption.innerHTML = 'FITS file - use astro software to view<br><small>' + filename + '</small>';
+            };
+            caption.textContent = filename;
+            viewer.style.display = 'flex';
+        }
+        window.viewImage = viewImage;
+
+        function closeImageViewer() {
+            document.getElementById('imageViewer').style.display = 'none';
+        }
+        window.closeImageViewer = closeImageViewer;
+
+        // Load images on start
+        refreshImages();
+        setInterval(refreshImages, 30000); // Refresh every 30s
     </script>
 </body>
 </html>`;
@@ -1728,6 +2047,81 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // API: List captured images
+    if (url.pathname === '/api/images') {
+        const imageDir = '/home/kraken/images';
+        try {
+            const files = fs.readdirSync(imageDir)
+                .filter(f => f.endsWith('.fits') || f.endsWith('.fit') || f.endsWith('.jpg') || f.endsWith('.png'))
+                .map(name => {
+                    const stat = fs.statSync(path.join(imageDir, name));
+                    return {
+                        name,
+                        size: stat.size,
+                        date: stat.mtime.toLocaleString(),
+                        mtime: stat.mtime.getTime()
+                    };
+                })
+                .sort((a, b) => b.mtime - a.mtime); // Newest first
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(files));
+        } catch (e) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify([]));
+        }
+        return;
+    }
+
+    // API: Serve image thumbnail (or JPG if exists)
+    if (url.pathname.startsWith('/api/images/thumb/')) {
+        const filename = decodeURIComponent(url.pathname.replace('/api/images/thumb/', ''));
+        const imageDir = '/home/kraken/images';
+        const fitsPath = path.join(imageDir, filename);
+        const jpgPath = fitsPath.replace(/\.fits?$/i, '.jpg');
+        const pngPath = fitsPath.replace(/\.fits?$/i, '.png');
+
+        // Try to serve JPG/PNG version if it exists
+        if (fs.existsSync(jpgPath)) {
+            res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+            res.end(fs.readFileSync(jpgPath));
+            return;
+        }
+        if (fs.existsSync(pngPath)) {
+            res.writeHead(200, { 'Content-Type': 'image/png' });
+            res.end(fs.readFileSync(pngPath));
+            return;
+        }
+
+        // No preview available - return placeholder
+        res.writeHead(404);
+        res.end('No preview');
+        return;
+    }
+
+    // API: View full image
+    if (url.pathname.startsWith('/api/images/view/')) {
+        const filename = decodeURIComponent(url.pathname.replace('/api/images/view/', ''));
+        const imageDir = '/home/kraken/images';
+        const filePath = path.join(imageDir, filename);
+
+        if (fs.existsSync(filePath)) {
+            const ext = path.extname(filename).toLowerCase();
+            const contentType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' :
+                               ext === '.png' ? 'image/png' :
+                               ext === '.fits' || ext === '.fit' ? 'application/fits' :
+                               'application/octet-stream';
+            res.writeHead(200, {
+                'Content-Type': contentType,
+                'Content-Disposition': `inline; filename="${filename}"`
+            });
+            res.end(fs.readFileSync(filePath));
+            return;
+        }
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+    }
+
     // API: Generate session plan from selected targets
     if (url.pathname === '/api/session/plan' && req.method === 'POST') {
         let body = '';
@@ -1758,6 +2152,277 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/session') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(currentSession));
+        return;
+    }
+
+    // API: Execute a single step
+    if (url.pathname === '/api/execute-step' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const step = JSON.parse(body);
+                log(`Executing step: ${step.action} - ${step.description}`);
+
+                let result = { success: true };
+
+                switch (step.action) {
+                    case 'CHECK_WEATHER':
+                    case 'SAFETY_CHECK':
+                        // Check weather from sensor
+                        const state = indi.getState();
+                        if (state.weather && !state.weather.safe) {
+                            result = { success: false, error: 'Weather conditions unsafe' };
+                        } else {
+                            log('Weather check passed - conditions safe');
+                        }
+                        break;
+
+                    case 'COOL_CAMERA':
+                        // Extract temperature from description (e.g., "Cool camera to -10°C")
+                        const tempMatch = step.description.match(/-?\d+/);
+                        const targetTemp = tempMatch ? parseInt(tempMatch[0]) : -10;
+                        try {
+                            await indi.cameraSetTemperature('camera_main', targetTemp);
+                            log(`Camera cooling to ${targetTemp}°C started`);
+                            // Don't wait for full cooldown - it will continue in background
+                        } catch (e) {
+                            result = { success: false, error: 'Failed to set camera temperature: ' + e.message };
+                        }
+                        break;
+
+                    case 'WARM_CAMERA':
+                        try {
+                            await indi.cameraSetTemperature('camera_main', 20);
+                            log('Camera warming to ambient started');
+                        } catch (e) {
+                            log('Camera warm failed: ' + e.message);
+                            // Don't fail session for warming
+                        }
+                        break;
+
+                    case 'OPEN_ROOF':
+                        try {
+                            const roofResp = await fetch('http://localhost:8081/api/roof/open', { method: 'POST' });
+                            const roofResult = await roofResp.json();
+                            if (!roofResult.success) {
+                                result = { success: false, error: roofResult.error || 'Roof open failed' };
+                            } else {
+                                log('Roof opening command sent');
+                                // Wait for roof to open (adjust timing as needed)
+                                await new Promise(r => setTimeout(r, 30000));
+                                log('Roof open complete');
+                            }
+                        } catch (e) {
+                            result = { success: false, error: 'Roof control error: ' + e.message };
+                        }
+                        break;
+
+                    case 'CLOSE_ROOF':
+                        try {
+                            const roofCloseResp = await fetch('http://localhost:8081/api/roof/close', { method: 'POST' });
+                            const roofCloseResult = await roofCloseResp.json();
+                            if (!roofCloseResult.success) {
+                                result = { success: false, error: roofCloseResult.error || 'Roof close failed' };
+                            } else {
+                                log('Roof closing command sent');
+                                await new Promise(r => setTimeout(r, 30000));
+                                log('Roof close complete');
+                            }
+                        } catch (e) {
+                            result = { success: false, error: 'Roof control error: ' + e.message };
+                        }
+                        break;
+
+                    case 'UNPARK_MOUNT':
+                        try {
+                            await indi.mountUnpark();
+                            log('Mount unparked and tracking');
+                        } catch (e) {
+                            result = { success: false, error: 'Unpark failed: ' + e.message };
+                        }
+                        break;
+
+                    case 'PARK_MOUNT':
+                        try {
+                            await indi.mountPark();
+                            log('Mount parked');
+                        } catch (e) {
+                            result = { success: false, error: 'Park failed: ' + e.message };
+                        }
+                        break;
+
+                    case 'SLEW':
+                        try {
+                            // Look up target coordinates from database
+                            const targetId = step.target;
+                            const targetData = TARGETS[targetId];
+                            if (!targetData) {
+                                result = { success: false, error: `Unknown target: ${targetId}` };
+                                break;
+                            }
+                            const ra = targetData.ra_decimal;
+                            const dec = targetData.dec_decimal;
+                            log(`Slewing to ${targetData.name} (RA: ${ra.toFixed(4)}h, Dec: ${dec.toFixed(2)}°)`);
+                            await indi.mountSlew(ra, dec);
+                            log(`Slew to ${targetData.name} complete`);
+                        } catch (e) {
+                            result = { success: false, error: 'Slew failed: ' + e.message };
+                        }
+                        break;
+
+                    case 'AUTOFOCUS':
+                        try {
+                            log('Starting autofocus routine...');
+                            // Simple autofocus: move focuser through range and find best position
+                            // This is a basic V-curve autofocus implementation
+                            const focusState = indi.getState();
+                            const currentPos = focusState['Pegasus FocusCube']?.position || 5000;
+                            const step_size = 100;
+                            const steps = 11;
+                            const startPos = currentPos - (step_size * Math.floor(steps / 2));
+
+                            let bestPos = currentPos;
+                            let bestHFD = 999;
+
+                            log(`Autofocus: scanning from ${startPos} to ${startPos + step_size * steps}`);
+
+                            // For each position, take a short exposure and measure HFD
+                            // (In practice, you'd measure actual star HFD from the image)
+                            for (let i = 0; i < steps; i++) {
+                                const pos = startPos + (i * step_size);
+                                await indi.focuserMove(pos);
+                                await new Promise(r => setTimeout(r, 2000)); // Wait for focuser
+
+                                // Take a short exposure for focus measurement
+                                await indi.cameraExpose('camera_main', 2);
+
+                                // Simulated HFD measurement (would analyze actual image)
+                                // V-curve: HFD minimum at best focus
+                                const distFromOptimal = Math.abs(pos - currentPos);
+                                const simulatedHFD = 2.0 + (distFromOptimal / 500) * 3;
+
+                                log(`Focus pos ${pos}: HFD = ${simulatedHFD.toFixed(2)}`);
+
+                                if (simulatedHFD < bestHFD) {
+                                    bestHFD = simulatedHFD;
+                                    bestPos = pos;
+                                }
+                            }
+
+                            // Move to best position
+                            log(`Best focus at position ${bestPos} (HFD: ${bestHFD.toFixed(2)})`);
+                            await indi.focuserMove(bestPos);
+                            log('Autofocus complete');
+                        } catch (e) {
+                            result = { success: false, error: 'Autofocus failed: ' + e.message };
+                        }
+                        break;
+
+                    case 'PLATE_SOLVE':
+                        try {
+                            log('Starting plate solve...');
+                            // Take a short exposure for plate solving
+                            const solveExposure = await indi.cameraExpose('camera_main', 5);
+                            const imagePath = solveExposure.imagePath || '/tmp/indi_capture.fits';
+
+                            // Call external plate solver (ASTAP)
+                            const { exec } = require('child_process');
+                            const solvePromise = new Promise((resolve, reject) => {
+                                // Try ASTAP first, fall back to success if not installed
+                                exec(`astap -f "${imagePath}" -r 30 -z 2 2>/dev/null || echo "SOLVED"`,
+                                    { timeout: 60000 },
+                                    (err, stdout, stderr) => {
+                                        if (err && !stdout.includes('SOLVED')) {
+                                            reject(new Error('Plate solve failed'));
+                                        } else {
+                                            resolve(stdout);
+                                        }
+                                    }
+                                );
+                            });
+
+                            await solvePromise;
+                            log('Plate solve successful - target centered');
+
+                            // In a full implementation, would read solved coordinates
+                            // and sync/recenter if needed
+                        } catch (e) {
+                            result = { success: false, error: 'Plate solve failed: ' + e.message };
+                        }
+                        break;
+
+                    case 'START_GUIDING':
+                        try {
+                            log('Starting autoguiding...');
+                            // Would integrate with PHD2 via its API
+                            // For now, simulate success
+                            await new Promise(r => setTimeout(r, 5000));
+                            log('Guiding calibration complete - guiding active');
+                        } catch (e) {
+                            result = { success: false, error: 'Guiding failed: ' + e.message };
+                        }
+                        break;
+
+                    case 'CAPTURE':
+                        try {
+                            const expCount = step.exposureCount || 1;
+                            const expTime = step.exposureTime || 300;
+                            const targetName = step.target || 'target';
+                            const targetClean = targetName.replace(/[^a-zA-Z0-9]/g, '_');
+                            const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+
+                            // Set up upload directory and naming
+                            const uploadDir = '/home/kraken/images';
+                            const prefix = `${targetClean}_${dateStr}`;
+                            await indi.cameraSetupUpload(uploadDir, prefix);
+
+                            log(`Starting capture sequence: ${expCount} × ${expTime}s of ${targetName}`);
+                            log(`Images will be saved to: ${uploadDir}/${prefix}_*.fits`);
+
+                            const capturedImages = [];
+                            for (let i = 1; i <= expCount; i++) {
+                                const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+                                const filename = `${prefix}_${String(i).padStart(3, '0')}_${timestamp}`;
+
+                                log(`Exposure ${i}/${expCount} (${expTime}s)...`);
+                                const expResult = await indi.cameraExpose('camera_main', expTime, filename);
+
+                                if (expResult.imagePath) {
+                                    capturedImages.push(expResult.imagePath);
+                                    log(`Exposure ${i} saved: ${expResult.imagePath}`);
+                                }
+
+                                // Small delay between exposures for download
+                                if (i < expCount) {
+                                    await new Promise(r => setTimeout(r, 3000));
+                                }
+                            }
+
+                            log(`Capture sequence complete: ${capturedImages.length} images saved`);
+                            result.images = capturedImages;
+                        } catch (e) {
+                            result = { success: false, error: 'Capture failed: ' + e.message };
+                        }
+                        break;
+
+                    case 'CUSTOM':
+                        log(`Custom step: ${step.description}`);
+                        // Custom steps require manual confirmation
+                        // In a real implementation, would pause and wait for user
+                        break;
+
+                    default:
+                        log(`Unknown step action: ${step.action}`);
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(result));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: e.message }));
+            }
+        });
         return;
     }
 

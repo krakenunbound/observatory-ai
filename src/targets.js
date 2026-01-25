@@ -427,7 +427,8 @@ function getRankedTargets(lat, lon, minAltitude = 40) {
 }
 
 // Generate a session plan from selected targets
-function generateSessionPlan(targetIds, lat, lon) {
+// targets can be array of IDs (strings) or objects with {id, exposures, exposureTime}
+function generateSessionPlan(targets, lat, lon) {
     const now = new Date();
     const plan = {
         created: now.toISOString(),
@@ -443,17 +444,33 @@ function generateSessionPlan(targetIds, lat, lon) {
     const targetMap = {};
     ranked.forEach(t => targetMap[t.id] = t);
 
+    // Build targets list - handle both string IDs and objects with custom exposures
+    const targetInputs = targets.map(t => {
+        if (typeof t === 'string') {
+            return { id: t, exposures: null, exposureTime: null };
+        }
+        return t;
+    });
+
     // Add pre-session steps
-    plan.steps.push({ action: 'CHECK_WEATHER', description: 'Verify weather conditions safe', status: 'pending' });
-    plan.steps.push({ action: 'OPEN_ROOF', description: 'Open observatory roof', status: 'pending' });
-    plan.steps.push({ action: 'COOL_CAMERA', description: 'Start camera cooling to -20°C', status: 'pending' });
-    plan.steps.push({ action: 'UNPARK_MOUNT', description: 'Unpark mount and enable tracking', status: 'pending' });
+    plan.steps.push({ action: 'CHECK_WEATHER', description: 'Verify weather conditions safe', status: 'pending', enabled: true });
+    plan.steps.push({ action: 'COOL_CAMERA', description: 'Cool camera to -10°C', status: 'pending', enabled: true });
+    plan.steps.push({ action: 'OPEN_ROOF', description: 'Open observatory roof', status: 'pending', enabled: true });
+    plan.steps.push({ action: 'UNPARK_MOUNT', description: 'Unpark mount and enable tracking', status: 'pending', enabled: true });
 
     let currentTime = now.getTime() + 15 * 60000; // Start 15 min from now
 
     // Sort targets by optimal imaging order (by set time, earliest first)
-    const orderedTargets = targetIds
-        .map(id => targetMap[id])
+    const orderedTargets = targetInputs
+        .map(input => {
+            const target = targetMap[input.id];
+            if (!target) return null;
+            return {
+                ...target,
+                customExposures: input.exposures,
+                customExposureTime: input.exposureTime
+            };
+        })
         .filter(t => t)
         .sort((a, b) => {
             if (!a.setTime && !b.setTime) return b.priority - a.priority;
@@ -463,8 +480,9 @@ function generateSessionPlan(targetIds, lat, lon) {
         });
 
     for (const target of orderedTargets) {
-        const exposureCount = target.suggestedExposures;
-        const exposureTime = target.exposureTime;
+        // Use custom exposures if provided, otherwise use suggested
+        const exposureCount = target.customExposures || target.suggestedExposures;
+        const exposureTime = target.customExposureTime || target.exposureTime;
         const totalTargetTime = exposureCount * (exposureTime + 30); // +30s overhead
 
         plan.targets.push({
@@ -478,32 +496,36 @@ function generateSessionPlan(targetIds, lat, lon) {
             startTime: new Date(currentTime).toISOString()
         });
 
-        // Add steps for this target
+        // Add steps for this target (order: slew → autofocus → plate solve → capture)
         plan.steps.push({
             action: 'SLEW',
             target: target.id,
             description: `Slew to ${target.name}`,
-            status: 'pending'
+            status: 'pending',
+            enabled: true
+        });
+        plan.steps.push({
+            action: 'AUTOFOCUS',
+            target: target.id,
+            description: `Autofocus on ${target.name}`,
+            status: 'pending',
+            enabled: true
         });
         plan.steps.push({
             action: 'PLATE_SOLVE',
             target: target.id,
             description: `Plate solve and center ${target.name}`,
-            status: 'pending'
-        });
-        plan.steps.push({
-            action: 'AUTOFOCUS',
-            target: target.id,
-            description: 'Run autofocus routine',
-            status: 'pending'
+            status: 'pending',
+            enabled: true
         });
         plan.steps.push({
             action: 'CAPTURE',
             target: target.id,
-            description: `Capture ${exposureCount}x ${exposureTime}s exposures of ${target.name}`,
+            description: `Capture ${exposureCount} × ${exposureTime}s of ${target.name}`,
             exposureCount: exposureCount,
             exposureTime: exposureTime,
-            status: 'pending'
+            status: 'pending',
+            enabled: true
         });
 
         plan.totalExposureTime += totalTargetTime;
@@ -512,9 +534,9 @@ function generateSessionPlan(targetIds, lat, lon) {
     }
 
     // Add shutdown steps
-    plan.steps.push({ action: 'PARK_MOUNT', description: 'Park mount', status: 'pending' });
-    plan.steps.push({ action: 'CLOSE_ROOF', description: 'Close observatory roof', status: 'pending' });
-    plan.steps.push({ action: 'WARM_CAMERA', description: 'Warm camera to ambient', status: 'pending' });
+    plan.steps.push({ action: 'PARK_MOUNT', description: 'Park mount', status: 'pending', enabled: true });
+    plan.steps.push({ action: 'CLOSE_ROOF', description: 'Close observatory roof', status: 'pending', enabled: true });
+    plan.steps.push({ action: 'WARM_CAMERA', description: 'Warm camera to ambient', status: 'pending', enabled: true });
 
     plan.estimatedEnd = new Date(currentTime).toISOString();
     plan.totalExposureTimeHours = Math.round(plan.totalExposureTime / 3600 * 10) / 10;

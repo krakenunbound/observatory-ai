@@ -207,7 +207,7 @@ class INDIWrapper {
         while (Date.now() - startTime < timeout) {
             await new Promise(r => setTimeout(r, 1000));
             const devices = this.realClient.getDevices();
-            const telescope = devices['Telescope Simulator'];
+            const telescope = devices['10micron'];
             if (telescope) {
                 const coords = telescope.properties.EQUATORIAL_EOD_COORD?.values;
                 if (coords) {
@@ -248,6 +248,19 @@ class INDIWrapper {
     }
 
     // Camera commands
+
+    // Configure camera upload settings
+    async cameraSetupUpload(directory, prefix = 'IMAGE_XXX') {
+        this.uploadDir = directory;
+        this.uploadPrefix = prefix;
+        if (this.mode === 'real') {
+            this.realClient.setupCCDUpload(directory, prefix);
+            this.realClient.disableOverscan();
+            return { success: true };
+        }
+        return { success: true };
+    }
+
     async cameraSetTemperature(deviceKey, temp) {
         if (this.mode === 'real') {
             console.log(`[INDI] Setting camera temperature to ${temp}°C`);
@@ -258,12 +271,16 @@ class INDIWrapper {
         }
     }
 
-    async cameraExpose(deviceKey, duration) {
+    async cameraExpose(deviceKey, duration, filename = null) {
         if (this.mode === 'real') {
             console.log(`[INDI] Starting ${duration}s exposure`);
             this.realClient.expose(duration);
-            await new Promise(r => setTimeout(r, (duration + 2) * 1000));
-            return { success: true, imagePath: '/tmp/indi_capture.fits' };
+            await new Promise(r => setTimeout(r, (duration + 5) * 1000)); // +5s for download
+
+            // Return expected image path based on upload settings
+            const dir = this.uploadDir || '/home/kraken/images';
+            const imagePath = `${dir}/${filename || 'capture'}.fits`;
+            return { success: true, imagePath };
         } else {
             return await this.simulator.cameraExpose(deviceKey, duration);
         }

@@ -262,7 +262,7 @@ class INDIClient {
 
     // Slew to coordinates (RA in hours, Dec in degrees)
     slewTo(ra, dec) {
-        this.setNumber('Telescope Simulator', 'EQUATORIAL_EOD_COORD', {
+        this.setNumber('10micron', 'EQUATORIAL_EOD_COORD', {
             'RA': ra,
             'DEC': dec
         });
@@ -270,43 +270,69 @@ class INDIClient {
 
     // Park the telescope
     park() {
-        this.setSwitch('Telescope Simulator', 'TELESCOPE_PARK', 'PARK', true);
+        this.setSwitch('10micron', 'TELESCOPE_PARK', 'PARK', true);
     }
 
     // Unpark the telescope
     unpark() {
-        this.setSwitch('Telescope Simulator', 'TELESCOPE_PARK', 'UNPARK', true);
+        this.setSwitch('10micron', 'TELESCOPE_PARK', 'UNPARK', true);
     }
 
     // Start tracking
     track() {
-        this.setSwitch('Telescope Simulator', 'TELESCOPE_TRACK_STATE', 'TRACK_ON', true);
+        this.setSwitch('10micron', 'TELESCOPE_TRACK_STATE', 'TRACK_ON', true);
     }
 
     // Stop tracking
     stopTracking() {
-        this.setSwitch('Telescope Simulator', 'TELESCOPE_TRACK_STATE', 'TRACK_OFF', true);
+        this.setSwitch('10micron', 'TELESCOPE_TRACK_STATE', 'TRACK_OFF', true);
     }
 
     // ===== High-level CCD commands =====
 
+    // Configure upload settings (call before exposing)
+    setupCCDUpload(directory, prefix = 'IMAGE_XXX') {
+        // Set upload mode to LOCAL (save to disk)
+        this.setSwitch('QHY CCD QHY600C-b4444f4', 'UPLOAD_MODE', 'UPLOAD_LOCAL', true);
+
+        // Set upload directory and prefix
+        this.setText('QHY CCD QHY600C-b4444f4', 'UPLOAD_SETTINGS', {
+            'UPLOAD_DIR': directory,
+            'UPLOAD_PREFIX': prefix
+        });
+
+        console.log(`[INDI] CCD upload configured: ${directory}/${prefix}`);
+    }
+
+    // Disable overscan (QHY specific)
+    disableOverscan() {
+        // Try to disable overscan if the property exists
+        try {
+            this.setSwitch('QHY CCD QHY600C-b4444f4', 'CCD_OVERSCAN', 'OVERSCAN_OFF', true);
+            console.log('[INDI] Overscan disabled');
+        } catch (e) {
+            // Property might not exist on all cameras
+            console.log('[INDI] Overscan property not found (may be OK)');
+        }
+    }
+
     // Take an exposure
     expose(seconds) {
-        this.setNumber('CCD Simulator', 'CCD_EXPOSURE', {
+        this.setNumber('QHY CCD QHY600C-b4444f4', 'CCD_EXPOSURE', {
             'CCD_EXPOSURE_VALUE': seconds
         });
     }
 
     // Set CCD temperature
     setCCDTemperature(temp) {
-        this.setNumber('CCD Simulator', 'CCD_TEMPERATURE', {
+        this.setNumber('QHY CCD QHY600C-b4444f4', 'CCD_TEMPERATURE', {
             'CCD_TEMPERATURE_VALUE': temp
         });
     }
 
     // Set CCD binning
     setBinning(x, y) {
-        this.setNumber('CCD Simulator', 'CCD_BINNING', {
+        this.setNumber('QHY CCD QHY600C-b4444f4', 'CCD_BINNING', {
             'HOR_BIN': x,
             'VER_BIN': y
         });
@@ -316,19 +342,19 @@ class INDIClient {
 
     // Move focuser to absolute position
     focusTo(position) {
-        this.setNumber('Focuser Simulator', 'ABS_FOCUS_POSITION', {
+        this.setNumber('Pegasus FocusCube', 'ABS_FOCUS_POSITION', {
             'FOCUS_ABSOLUTE_POSITION': position
         });
     }
 
     // Move focuser relative
     focusRelative(steps) {
-        this.setNumber('Focuser Simulator', 'REL_FOCUS_POSITION', {
+        this.setNumber('Pegasus FocusCube', 'REL_FOCUS_POSITION', {
             'FOCUS_RELATIVE_POSITION': Math.abs(steps)
         });
         // Set direction
         const dir = steps > 0 ? 'FOCUS_INWARD' : 'FOCUS_OUTWARD';
-        this.setSwitch('Focuser Simulator', 'FOCUS_MOTION', dir, true);
+        this.setSwitch('Pegasus FocusCube', 'FOCUS_MOTION', dir, true);
     }
 }
 
