@@ -330,4 +330,196 @@ function suggestParameters(target, camera = 'QHY600C') {
     return params;
 }
 
-module.exports = { TARGETS, calculateAltAz, findImagingWindow, suggestParameters };
+// Get ranked targets for tonight based on current time and location
+function getRankedTargets(lat, lon, minAltitude = 40) {
+    const now = new Date();
+    const ranked = [];
+
+    for (const [id, target] of Object.entries(TARGETS)) {
+        // Calculate current position
+        const currentPos = calculateAltAz(target.ra_decimal, target.dec_decimal, lat, lon, now);
+
+        // Find imaging window
+        const window = findImagingWindow(target, lat, lon, now);
+
+        if (!window) continue; // Not visible tonight
+
+        // Calculate time remaining above minimum altitude
+        let timeAboveMin = 0;
+        const checkStart = new Date(Math.max(now.getTime(), window.start.getTime()));
+        for (let t = checkStart.getTime(); t <= window.end.getTime(); t += 15 * 60000) {
+            const pos = calculateAltAz(target.ra_decimal, target.dec_decimal, lat, lon, new Date(t));
+            if (pos.altitude >= minAltitude) {
+                timeAboveMin += 15;
+            }
+        }
+
+        // Calculate when target reaches minimum altitude (setting)
+        let setTime = null;
+        if (currentPos.altitude >= minAltitude) {
+            // Currently above min, find when it sets
+            for (let t = now.getTime(); t <= window.end.getTime() + 3600000; t += 15 * 60000) {
+                const pos = calculateAltAz(target.ra_decimal, target.dec_decimal, lat, lon, new Date(t));
+                if (pos.altitude < minAltitude) {
+                    setTime = new Date(t);
+                    break;
+                }
+            }
+        }
+
+        // Calculate suggested exposure count based on available time
+        const params = suggestParameters(target);
+        const exposureTime = target.min_exposure || 120;
+        const maxExposures = Math.floor((timeAboveMin * 60) / (exposureTime + 30)); // +30s for download/dither
+
+        // Priority score: higher is better
+        // - Bonus for being up now and high
+        // - Bonus for longer imaging window
+        // - Bonus for setting soon (image it before it's gone!)
+        let priority = 0;
+
+        if (currentPos.altitude >= minAltitude) {
+            priority += 100; // Currently imageable
+            priority += currentPos.altitude; // Higher is better
+
+            // Urgency bonus: if it sets within 3 hours, boost priority
+            if (setTime) {
+                const hoursUntilSet = (setTime.getTime() - now.getTime()) / 3600000;
+                if (hoursUntilSet < 3) {
+                    priority += (3 - hoursUntilSet) * 30; // Up to 90 point bonus
+                }
+            }
+        } else if (window.start > now) {
+            // Rising later - lower priority but still viable
+            const hoursUntilRise = (window.start.getTime() - now.getTime()) / 3600000;
+            priority += 50 - hoursUntilRise * 10; // Closer rise time = higher priority
+        }
+
+        // Bonus for longer available window
+        priority += Math.min(timeAboveMin / 60, 5) * 10; // Up to 50 points for 5+ hours
+
+        ranked.push({
+            id,
+            ...target,
+            currentAltitude: Math.round(currentPos.altitude * 10) / 10,
+            currentAzimuth: Math.round(currentPos.azimuth),
+            isUp: currentPos.altitude >= minAltitude,
+            window: {
+                start: window.start.toISOString(),
+                end: window.end.toISOString(),
+                peak: window.peak.toISOString(),
+                peakAltitude: Math.round(window.peakAltitude * 10) / 10,
+                duration: Math.round(window.duration * 10) / 10
+            },
+            timeAboveMinAlt: timeAboveMin, // minutes
+            setTime: setTime ? setTime.toISOString() : null,
+            suggestedExposures: Math.min(maxExposures, 50), // Cap at 50
+            exposureTime: exposureTime,
+            priority: Math.round(priority),
+            params: params
+        });
+    }
+
+    // Sort by priority (highest first)
+    ranked.sort((a, b) => b.priority - a.priority);
+
+    return ranked;
+}
+
+// Generate a session plan from selected targets
+function generateSessionPlan(targetIds, lat, lon) {
+    const now = new Date();
+    const plan = {
+        created: now.toISOString(),
+        targets: [],
+        totalExposureTime: 0,
+        totalImages: 0,
+        estimatedEnd: null,
+        steps: []
+    };
+
+    // Get ranked info for each target
+    const ranked = getRankedTargets(lat, lon);
+    const targetMap = {};
+    ranked.forEach(t => targetMap[t.id] = t);
+
+    // Add pre-session steps
+    plan.steps.push({ action: 'CHECK_WEATHER', description: 'Verify weather conditions safe', status: 'pending' });
+    plan.steps.push({ action: 'OPEN_ROOF', description: 'Open observatory roof', status: 'pending' });
+    plan.steps.push({ action: 'COOL_CAMERA', description: 'Start camera cooling to -20°C', status: 'pending' });
+    plan.steps.push({ action: 'UNPARK_MOUNT', description: 'Unpark mount and enable tracking', status: 'pending' });
+
+    let currentTime = now.getTime() + 15 * 60000; // Start 15 min from now
+
+    // Sort targets by optimal imaging order (by set time, earliest first)
+    const orderedTargets = targetIds
+        .map(id => targetMap[id])
+        .filter(t => t)
+        .sort((a, b) => {
+            if (!a.setTime && !b.setTime) return b.priority - a.priority;
+            if (!a.setTime) return 1;
+            if (!b.setTime) return -1;
+            return new Date(a.setTime).getTime() - new Date(b.setTime).getTime();
+        });
+
+    for (const target of orderedTargets) {
+        const exposureCount = target.suggestedExposures;
+        const exposureTime = target.exposureTime;
+        const totalTargetTime = exposureCount * (exposureTime + 30); // +30s overhead
+
+        plan.targets.push({
+            id: target.id,
+            name: target.name,
+            ra: target.ra_decimal,
+            dec: target.dec_decimal,
+            exposureTime: exposureTime,
+            exposureCount: exposureCount,
+            totalTime: Math.round(totalTargetTime / 60), // minutes
+            startTime: new Date(currentTime).toISOString()
+        });
+
+        // Add steps for this target
+        plan.steps.push({
+            action: 'SLEW',
+            target: target.id,
+            description: `Slew to ${target.name}`,
+            status: 'pending'
+        });
+        plan.steps.push({
+            action: 'PLATE_SOLVE',
+            target: target.id,
+            description: `Plate solve and center ${target.name}`,
+            status: 'pending'
+        });
+        plan.steps.push({
+            action: 'AUTOFOCUS',
+            target: target.id,
+            description: 'Run autofocus routine',
+            status: 'pending'
+        });
+        plan.steps.push({
+            action: 'CAPTURE',
+            target: target.id,
+            description: `Capture ${exposureCount}x ${exposureTime}s exposures of ${target.name}`,
+            exposureCount: exposureCount,
+            exposureTime: exposureTime,
+            status: 'pending'
+        });
+
+        plan.totalExposureTime += totalTargetTime;
+        plan.totalImages += exposureCount;
+        currentTime += totalTargetTime * 1000 + 10 * 60000; // +10 min for slew/focus
+    }
+
+    // Add shutdown steps
+    plan.steps.push({ action: 'PARK_MOUNT', description: 'Park mount', status: 'pending' });
+    plan.steps.push({ action: 'CLOSE_ROOF', description: 'Close observatory roof', status: 'pending' });
+    plan.steps.push({ action: 'WARM_CAMERA', description: 'Warm camera to ambient', status: 'pending' });
+
+    plan.estimatedEnd = new Date(currentTime).toISOString();
+    plan.totalExposureTimeHours = Math.round(plan.totalExposureTime / 3600 * 10) / 10;
+
+    return plan;
+}
+
+module.exports = { TARGETS, calculateAltAz, findImagingWindow, suggestParameters, getRankedTargets, generateSessionPlan };

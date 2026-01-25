@@ -2,7 +2,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const INDIWrapper = require('./src/indi-wrapper');
-const { TARGETS, calculateAltAz, findImagingWindow, suggestParameters } = require('./src/targets');
+const { TARGETS, calculateAltAz, findImagingWindow, suggestParameters, getRankedTargets, generateSessionPlan } = require('./src/targets');
 
 const PORT = 8092;
 const INDI_HOST = process.env.INDI_HOST || 'localhost';
@@ -733,8 +733,52 @@ const HTML = `<!DOCTYPE html>
             </div>
 
             <div class="panel" id="panel3">
-                <h2>Target Database</h2>
+                <h2>Tonight's Targets (Best First)</h2>
+                <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 10px;">
+                    Click to add to session plan. Green = up now, Yellow = rising soon.
+                </div>
                 <div class="target-list" id="targetList"></div>
+            </div>
+        </div>
+
+        <!-- Session Planner Row -->
+        <div class="grid" style="margin-top: 20px; grid-template-columns: 1fr 1fr;">
+            <!-- Session Plan Panel -->
+            <div class="panel" id="sessionPanel">
+                <h2>Session Plan</h2>
+                <div id="sessionTargets" style="margin-bottom: 15px;">
+                    <div style="color: var(--text-muted); font-size: 0.85rem;">No targets selected. Click targets above to add.</div>
+                </div>
+                <div id="sessionSummary" style="display: none; margin-bottom: 15px; padding: 12px; background: rgba(0,0,0,0.3); border-radius: 8px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span>Total Images:</span>
+                        <span id="planTotalImages" style="color: var(--cyan);">0</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span>Total Time:</span>
+                        <span id="planTotalTime" style="color: var(--cyan);">0h</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span>Est. End:</span>
+                        <span id="planEndTime" style="color: var(--cyan);">--</span>
+                    </div>
+                </div>
+                <div class="btn-row">
+                    <button class="btn btn-success" onclick="generatePlan()" id="btnGenerate" disabled>Generate Plan</button>
+                    <button class="btn btn-danger" onclick="clearPlan()">Clear</button>
+                </div>
+            </div>
+
+            <!-- Execution Panel -->
+            <div class="panel" id="executionPanel">
+                <h2>Session Steps</h2>
+                <div id="planStepsList" style="max-height: 300px; overflow-y: auto;">
+                    <div style="color: var(--text-muted); font-size: 0.85rem;">Generate a plan to see steps.</div>
+                </div>
+                <div class="btn-row" style="margin-top: 15px;">
+                    <button class="btn btn-primary" onclick="executeSession()" id="btnExecute" disabled>Start Session</button>
+                    <button class="btn btn-danger" onclick="abortSession()" id="btnAbort" disabled>Abort</button>
+                </div>
             </div>
         </div>
 
@@ -979,24 +1023,189 @@ const HTML = `<!DOCTYPE html>
         const WS_URL = 'ws://' + window.location.hostname + ':8093';
         let ws;
         let currentPlan = null;
+        let selectedTargets = [];  // Targets added to session plan
+        let rankedTargets = [];    // All ranked targets for tonight
 
-        // Populate target list
-        function populateTargets(targets) {
+        // Populate target list with ranked targets
+        function populateRankedTargets(targets) {
+            rankedTargets = targets;
             const list = document.getElementById('targetList');
             list.innerHTML = '';
-            for (const [id, target] of Object.entries(targets)) {
+
+            for (const target of targets) {
                 const div = document.createElement('div');
                 div.className = 'target-item';
-                div.onclick = () => {
-                    document.getElementById('targetInput').value = id;
-                    planTarget();
-                };
+                div.id = 'target-' + target.id;
+
+                // Color based on visibility
+                let statusColor = 'var(--text-muted)';
+                let statusText = '';
+                if (target.isUp) {
+                    statusColor = 'var(--green)';
+                    if (target.setTime) {
+                        const hoursLeft = (new Date(target.setTime) - new Date()) / 3600000;
+                        statusText = Math.round(hoursLeft * 10) / 10 + 'h left';
+                    } else {
+                        statusText = 'Up all night';
+                    }
+                } else {
+                    statusColor = 'var(--gold)';
+                    const hoursUntil = (new Date(target.window.start) - new Date()) / 3600000;
+                    if (hoursUntil > 0) {
+                        statusText = 'Rises in ' + Math.round(hoursUntil * 10) / 10 + 'h';
+                    }
+                }
+
+                // Check if already in plan
+                const inPlan = selectedTargets.includes(target.id);
+                if (inPlan) {
+                    div.style.borderColor = 'var(--accent)';
+                    div.style.background = 'rgba(102, 126, 234, 0.15)';
+                }
+
+                div.onclick = () => toggleTargetInPlan(target.id);
                 div.innerHTML =
-                    '<div class="target-item-name">' + id + ' - ' + target.name + '</div>' +
-                    '<div class="target-item-info">' + target.type + ' in ' + target.constellation +
-                    ' | Mag ' + target.magnitude + ' | ' + target.size_arcmin + "'" + '</div>';
+                    '<div style="display: flex; justify-content: space-between; align-items: center;">' +
+                    '<div class="target-item-name">' + target.id + ' - ' + target.name + '</div>' +
+                    '<div style="font-size: 0.75rem; color: ' + statusColor + ';">' + statusText + '</div>' +
+                    '</div>' +
+                    '<div class="target-item-info">' +
+                    '<span style="color: var(--cyan);">Alt: ' + target.currentAltitude + '°</span> | ' +
+                    target.type + ' | ' + target.suggestedExposures + 'x ' + target.exposureTime + 's' +
+                    (inPlan ? ' <span style="color: var(--accent);">✓ In Plan</span>' : '') +
+                    '</div>';
                 list.appendChild(div);
             }
+        }
+
+        // Toggle target in/out of session plan
+        function toggleTargetInPlan(targetId) {
+            const idx = selectedTargets.indexOf(targetId);
+            if (idx === -1) {
+                selectedTargets.push(targetId);
+            } else {
+                selectedTargets.splice(idx, 1);
+            }
+            updateSessionPlanUI();
+            populateRankedTargets(rankedTargets); // Refresh to show selection
+        }
+
+        // Update session plan UI
+        function updateSessionPlanUI() {
+            const container = document.getElementById('sessionTargets');
+            const summary = document.getElementById('sessionSummary');
+            const btnGenerate = document.getElementById('btnGenerate');
+
+            if (selectedTargets.length === 0) {
+                container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem;">No targets selected. Click targets above to add.</div>';
+                summary.style.display = 'none';
+                btnGenerate.disabled = true;
+                return;
+            }
+
+            btnGenerate.disabled = false;
+            let html = '';
+            let totalImages = 0;
+            let totalTime = 0;
+
+            for (const id of selectedTargets) {
+                const target = rankedTargets.find(t => t.id === id);
+                if (!target) continue;
+
+                totalImages += target.suggestedExposures;
+                totalTime += target.suggestedExposures * (target.exposureTime + 30);
+
+                html += '<div class="device" style="cursor: pointer;" onclick="toggleTargetInPlan(\\'' + id + '\\')">' +
+                    '<span class="device-name">' + id + '</span>' +
+                    '<span style="color: var(--cyan);">' + target.suggestedExposures + ' × ' + target.exposureTime + 's</span>' +
+                    '<span style="color: var(--red); margin-left: 10px;">✕</span>' +
+                    '</div>';
+            }
+
+            container.innerHTML = html;
+            summary.style.display = 'block';
+            document.getElementById('planTotalImages').textContent = totalImages;
+            document.getElementById('planTotalTime').textContent = (totalTime / 3600).toFixed(1) + 'h';
+
+            const endTime = new Date(Date.now() + totalTime * 1000 + 30 * 60000);
+            document.getElementById('planEndTime').textContent = endTime.toLocaleTimeString();
+        }
+        window.toggleTargetInPlan = toggleTargetInPlan;
+
+        // Generate full session plan
+        async function generatePlan() {
+            if (selectedTargets.length === 0) return;
+
+            try {
+                const resp = await fetch('/api/session/plan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ targets: selectedTargets })
+                });
+                const plan = await resp.json();
+
+                if (plan.error) {
+                    alert('Error: ' + plan.error);
+                    return;
+                }
+
+                currentPlan = plan;
+                displayPlanSteps(plan.steps);
+                document.getElementById('btnExecute').disabled = false;
+            } catch (e) {
+                alert('Failed to generate plan: ' + e.message);
+            }
+        }
+        window.generatePlan = generatePlan;
+
+        // Display plan steps
+        function displayPlanSteps(steps) {
+            const container = document.getElementById('planStepsList');
+            let html = '';
+            steps.forEach((step, i) => {
+                const iconClass = step.status === 'completed' ? 'step-completed' :
+                                 step.status === 'running' ? 'step-running' :
+                                 step.status === 'failed' ? 'step-failed' : 'step-pending';
+                const icon = step.status === 'completed' ? '✓' :
+                            step.status === 'failed' ? '✗' :
+                            step.status === 'running' ? '...' : (i + 1);
+                html += '<div class="plan-step">' +
+                    '<div class="step-icon ' + iconClass + '">' + icon + '</div>' +
+                    '<div style="flex: 1;">' + step.description + '</div>' +
+                    '</div>';
+            });
+            container.innerHTML = html;
+        }
+
+        // Clear session plan
+        function clearPlan() {
+            selectedTargets = [];
+            currentPlan = null;
+            updateSessionPlanUI();
+            populateRankedTargets(rankedTargets);
+            document.getElementById('planStepsList').innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem;">Generate a plan to see steps.</div>';
+            document.getElementById('btnExecute').disabled = true;
+            document.getElementById('btnAbort').disabled = true;
+        }
+        window.clearPlan = clearPlan;
+
+        // Execute session (placeholder - would trigger automated sequence)
+        async function executeSession() {
+            if (!currentPlan) return;
+            document.getElementById('btnExecute').disabled = true;
+            document.getElementById('btnAbort').disabled = false;
+            alert('Session execution would start here. This will be automated in the next phase.');
+            // TODO: Implement step-by-step execution
+        }
+        window.executeSession = executeSession;
+
+        // Legacy function for backwards compatibility
+        function populateTargets(targets) {
+            // Convert old format to ranked format
+            const ranked = Object.entries(targets).map(([id, t]) => ({
+                id, ...t, currentAltitude: 0, isUp: false, suggestedExposures: 10, exposureTime: 120
+            }));
+            populateRankedTargets(ranked);
         }
 
         // Update device status
@@ -1143,10 +1352,18 @@ const HTML = `<!DOCTYPE html>
                 console.error('Mode check error:', e);
             }
 
-            // Get targets
-            const targetsResp = await fetch('/api/targets');
-            const targets = await targetsResp.json();
-            populateTargets(targets);
+            // Get ranked targets for tonight
+            try {
+                const targetsResp = await fetch('/api/targets/ranked');
+                const targets = await targetsResp.json();
+                populateRankedTargets(targets);
+            } catch (e) {
+                console.error('Failed to load ranked targets:', e);
+                // Fallback to regular targets
+                const targetsResp = await fetch('/api/targets');
+                const targets = await targetsResp.json();
+                populateTargets(targets);
+            }
 
             // Get device state
             const stateResp = await fetch('/api/state');
@@ -1165,6 +1382,15 @@ const HTML = `<!DOCTYPE html>
                 updateDevices(state);
                 if (state.weather) updateWeather(state.weather);
             }, 5000);
+
+            // Refresh ranked targets every 5 minutes (positions change)
+            setInterval(async () => {
+                try {
+                    const resp = await fetch('/api/targets/ranked');
+                    const targets = await resp.json();
+                    populateRankedTargets(targets);
+                } catch (e) {}
+            }, 300000);
 
             setInterval(refreshLog, 3000);
         }
@@ -1491,6 +1717,47 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/targets') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(TARGETS));
+        return;
+    }
+
+    // API: Get ranked targets for tonight (sorted by imaging priority)
+    if (url.pathname === '/api/targets/ranked') {
+        const ranked = getRankedTargets(OBSERVATORY.latitude, OBSERVATORY.longitude);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(ranked));
+        return;
+    }
+
+    // API: Generate session plan from selected targets
+    if (url.pathname === '/api/session/plan' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            try {
+                const { targets } = JSON.parse(body);
+                if (!targets || !Array.isArray(targets)) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'targets array required' }));
+                    return;
+                }
+                const plan = generateSessionPlan(targets, OBSERVATORY.latitude, OBSERVATORY.longitude);
+                currentSession.plan = plan;
+                currentSession.active = true;
+                log(`Session planned: ${plan.targets.length} targets, ${plan.totalImages} images, ~${plan.totalExposureTimeHours}h`);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(plan));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // API: Get current session plan
+    if (url.pathname === '/api/session') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(currentSession));
         return;
     }
 
