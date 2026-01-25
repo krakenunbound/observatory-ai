@@ -117,12 +117,16 @@ class INDIWrapper {
                 // Extract relevant properties based on device type
                 const deviceState = { name, connected };
 
-                if (ourName === 'mount' || name.toLowerCase().includes('telescope')) {
+                if (ourName === 'mount' || name.toLowerCase().includes('telescope') || name.toLowerCase().includes('10micron')) {
                     const coords = props.EQUATORIAL_EOD_COORD?.values || {};
                     deviceState.ra = coords.RA?.value || 0;
                     deviceState.dec = coords.DEC?.value || 0;
                     deviceState.tracking = props.TELESCOPE_TRACK_STATE?.values?.TRACK_ON?.value || false;
                     deviceState.parked = props.TELESCOPE_PARK?.values?.PARK?.value || false;
+                    // Get Alt/Az if available
+                    const altaz = props.HORIZONTAL_COORD?.values || {};
+                    deviceState.alt = altaz.ALT?.value ?? null;
+                    deviceState.az = altaz.AZ?.value ?? null;
                 }
 
                 if (ourName === 'camera_main' || ourName === 'camera_mono' || name.toLowerCase().includes('ccd')) {
@@ -134,6 +138,9 @@ class INDIWrapper {
                 if (ourName === 'focuser' || name.toLowerCase().includes('focus')) {
                     const pos = props.ABS_FOCUS_POSITION?.values || {};
                     deviceState.position = pos.FOCUS_ABSOLUTE_POSITION?.value || 0;
+                    // Get focuser temperature (Pegasus FocusCube has temp sensor)
+                    const temp = props.FOCUS_TEMPERATURE?.values || {};
+                    deviceState.temperature = temp.TEMPERATURE?.value ?? null;
                 }
 
                 state[ourName] = deviceState;
@@ -329,6 +336,88 @@ class INDIWrapper {
         } else {
             return await this.simulator.focuserMove(position);
         }
+    }
+
+    // Track last focuser move direction for backlash compensation
+    lastFocuserDirection = null;
+    lastFocuserPosition = null;
+
+    // Focuser move with backlash compensation
+    // profile: { backlash: { inwardToOutward, outwardToInward }, reverseDirection, preferredFinalDirection }
+    async focuserMoveWithBacklash(targetPosition, profile = null, settleTime = 2000) {
+        // Get current position
+        const state = this.getState();
+        const focuserDevice = state['Pegasus FocusCube'] || state['focuser'] || {};
+        const currentPos = focuserDevice.position || this.lastFocuserPosition || 0;
+
+        // Determine direction
+        let direction = targetPosition > currentPos ? 'FOCUS_OUTWARD' : 'FOCUS_INWARD';
+
+        // Reverse if profile says so
+        if (profile && profile.reverseDirection) {
+            direction = direction === 'FOCUS_INWARD' ? 'FOCUS_OUTWARD' : 'FOCUS_INWARD';
+        }
+
+        // Check if we need backlash compensation (direction reversal)
+        let backlashSteps = 0;
+        if (profile && profile.backlash && this.lastFocuserDirection) {
+            if (this.lastFocuserDirection === 'FOCUS_INWARD' && direction === 'FOCUS_OUTWARD') {
+                backlashSteps = profile.backlash.inwardToOutward || 0;
+            } else if (this.lastFocuserDirection === 'FOCUS_OUTWARD' && direction === 'FOCUS_INWARD') {
+                backlashSteps = profile.backlash.outwardToInward || 0;
+            }
+        }
+
+        // Apply backlash compensation: overshoot then approach
+        if (backlashSteps > 0) {
+            const overshoot = direction === 'FOCUS_OUTWARD' ? targetPosition + backlashSteps : targetPosition - backlashSteps;
+            console.log(`[INDI] Backlash compensation: overshooting to ${overshoot} before ${targetPosition}`);
+            await this.focuserMove(overshoot);
+            await new Promise(r => setTimeout(r, settleTime));
+        }
+
+        // Move to final target
+        await this.focuserMove(targetPosition);
+        await new Promise(r => setTimeout(r, settleTime));
+
+        // Track direction for next move
+        this.lastFocuserDirection = direction;
+        this.lastFocuserPosition = targetPosition;
+
+        return { success: true, direction, backlashApplied: backlashSteps > 0 };
+    }
+
+    // SCT-specific final approach: ensures we approach from the preferred direction
+    async focuserFinalApproach(targetPosition, profile, settleTime = 2000) {
+        if (!profile || profile.scopeType !== 'SCT') {
+            // Non-SCT: just move directly with backlash compensation
+            return this.focuserMoveWithBacklash(targetPosition, profile, settleTime);
+        }
+
+        // SCT: approach from preferred direction to seat the mirror
+        const preferInward = profile.preferredFinalDirection === 'FOCUS_INWARD';
+        const backlash = preferInward ?
+            (profile.backlash?.outwardToInward || 100) :
+            (profile.backlash?.inwardToOutward || 100);
+
+        // Overshoot in opposite direction, then approach from preferred
+        const overshootPos = preferInward ?
+            targetPosition + backlash + 50 :  // Go outward first
+            targetPosition - backlash - 50;   // Go inward first
+
+        console.log(`[INDI] SCT final approach: overshoot to ${overshootPos}, then approach ${targetPosition} from ${profile.preferredFinalDirection}`);
+
+        await this.focuserMove(overshootPos);
+        await new Promise(r => setTimeout(r, settleTime));
+
+        await this.focuserMove(targetPosition);
+        await new Promise(r => setTimeout(r, settleTime));
+
+        // Track direction
+        this.lastFocuserDirection = profile.preferredFinalDirection;
+        this.lastFocuserPosition = targetPosition;
+
+        return { success: true, direction: profile.preferredFinalDirection, sctApproach: true };
     }
 
     // Filter wheel commands (simulation only for now)

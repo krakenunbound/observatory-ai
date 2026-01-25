@@ -79,6 +79,634 @@ let sessionProgress = {
     }
 };
 
+// ============================================================================
+// FOCUSER PROFILING SYSTEM
+// ============================================================================
+
+// Scope type defaults for profiling
+const SCOPE_DEFAULTS = {
+    Refractor:  { testDistance: 500,  maxBacklash: 200, stepSize: 100, settleTime: 1500 },
+    Newtonian:  { testDistance: 500,  maxBacklash: 200, stepSize: 100, settleTime: 1500 },
+    SCT:        { testDistance: 2000, maxBacklash: 500, stepSize: 150, settleTime: 2500 },
+    RC:         { testDistance: 1000, maxBacklash: 300, stepSize: 120, settleTime: 2000 }
+};
+
+// Profile storage directory
+const os = require('os');
+const PROFILE_DIR = path.join(os.homedir(), '.observatory', 'focuser-profiles');
+
+// Active focuser profile
+let activeFocuserProfile = null;
+
+// Profiling routine state
+let profilingState = {
+    active: false,
+    phase: '',          // 'slewing' | 'rough_focus' | 'backlash_in' | 'backlash_out' | 'step_size' | 'complete'
+    progress: 0,        // 0-100
+    message: '',
+    measurements: [],   // Collected measurements
+    error: null
+};
+
+// Ensure profile directory exists
+function ensureProfileDir() {
+    try {
+        if (!fs.existsSync(PROFILE_DIR)) {
+            fs.mkdirSync(PROFILE_DIR, { recursive: true });
+            console.log(`[Focuser] Created profile directory: ${PROFILE_DIR}`);
+        }
+        return true;
+    } catch (err) {
+        console.error(`[Focuser] Failed to create profile directory: ${err.message}`);
+        return false;
+    }
+}
+
+// Load all profiles index
+function loadProfilesIndex() {
+    ensureProfileDir();
+    const indexPath = path.join(PROFILE_DIR, 'profiles.json');
+    try {
+        if (fs.existsSync(indexPath)) {
+            const data = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+            return data;
+        }
+    } catch (err) {
+        console.error(`[Focuser] Failed to load profiles index: ${err.message}`);
+    }
+    return { activeProfile: null, profiles: [] };
+}
+
+// Save profiles index
+function saveProfilesIndex(index) {
+    ensureProfileDir();
+    const indexPath = path.join(PROFILE_DIR, 'profiles.json');
+    try {
+        fs.writeFileSync(indexPath, JSON.stringify(index, null, 2));
+        return true;
+    } catch (err) {
+        console.error(`[Focuser] Failed to save profiles index: ${err.message}`);
+        return false;
+    }
+}
+
+// Load a specific profile by ID
+function loadProfile(profileId) {
+    ensureProfileDir();
+    const profilePath = path.join(PROFILE_DIR, `${profileId}.json`);
+    try {
+        if (fs.existsSync(profilePath)) {
+            return JSON.parse(fs.readFileSync(profilePath, 'utf8'));
+        }
+    } catch (err) {
+        console.error(`[Focuser] Failed to load profile ${profileId}: ${err.message}`);
+    }
+    return null;
+}
+
+// Save a profile
+function saveProfile(profile) {
+    ensureProfileDir();
+    const profilePath = path.join(PROFILE_DIR, `${profile.id}.json`);
+    try {
+        fs.writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+
+        // Update index
+        const index = loadProfilesIndex();
+        const existingIdx = index.profiles.findIndex(p => p.id === profile.id);
+        const profileMeta = { id: profile.id, name: profile.name, scopeType: profile.scopeType };
+        if (existingIdx >= 0) {
+            index.profiles[existingIdx] = profileMeta;
+        } else {
+            index.profiles.push(profileMeta);
+        }
+        saveProfilesIndex(index);
+
+        console.log(`[Focuser] Saved profile: ${profile.name}`);
+        return true;
+    } catch (err) {
+        console.error(`[Focuser] Failed to save profile: ${err.message}`);
+        return false;
+    }
+}
+
+// Delete a profile
+function deleteProfile(profileId) {
+    ensureProfileDir();
+    const profilePath = path.join(PROFILE_DIR, `${profileId}.json`);
+    try {
+        if (fs.existsSync(profilePath)) {
+            fs.unlinkSync(profilePath);
+        }
+
+        // Update index
+        const index = loadProfilesIndex();
+        index.profiles = index.profiles.filter(p => p.id !== profileId);
+        if (index.activeProfile === profileId) {
+            index.activeProfile = null;
+            activeFocuserProfile = null;
+        }
+        saveProfilesIndex(index);
+
+        console.log(`[Focuser] Deleted profile: ${profileId}`);
+        return true;
+    } catch (err) {
+        console.error(`[Focuser] Failed to delete profile: ${err.message}`);
+        return false;
+    }
+}
+
+// Set active profile
+function setActiveProfile(profileId) {
+    const profile = loadProfile(profileId);
+    if (profile) {
+        activeFocuserProfile = profile;
+        const index = loadProfilesIndex();
+        index.activeProfile = profileId;
+        saveProfilesIndex(index);
+        console.log(`[Focuser] Active profile set: ${profile.name}`);
+        return true;
+    }
+    return false;
+}
+
+// Load active profile on startup
+function loadActiveProfile() {
+    const index = loadProfilesIndex();
+    if (index.activeProfile) {
+        activeFocuserProfile = loadProfile(index.activeProfile);
+        if (activeFocuserProfile) {
+            console.log(`[Focuser] Loaded active profile: ${activeFocuserProfile.name}`);
+        }
+    }
+}
+
+// ============================================================================
+// FOCUS TEMPERATURE DATABASE
+// ============================================================================
+
+const FOCUS_TEMP_DB_PATH = path.join(os.homedir(), '.observatory', 'focus-temp-log.json');
+
+// Load focus temperature database
+function loadFocusTempDB() {
+    try {
+        if (fs.existsSync(FOCUS_TEMP_DB_PATH)) {
+            return JSON.parse(fs.readFileSync(FOCUS_TEMP_DB_PATH, 'utf8'));
+        }
+    } catch (err) {
+        console.error(`[FocusTemp] Failed to load database: ${err.message}`);
+    }
+    return { entries: [], coefficients: {} };
+}
+
+// Save focus temperature database
+function saveFocusTempDB(db) {
+    try {
+        ensureProfileDir(); // Reuse the profile dir creation
+        fs.writeFileSync(FOCUS_TEMP_DB_PATH, JSON.stringify(db, null, 2));
+        return true;
+    } catch (err) {
+        console.error(`[FocusTemp] Failed to save database: ${err.message}`);
+        return false;
+    }
+}
+
+// Log a focus result with temperature
+function logFocusResult(profileId, temperature, position, hfr) {
+    if (temperature === null || temperature === undefined) {
+        console.log('[FocusTemp] No temperature data available, skipping log');
+        return null;
+    }
+
+    const db = loadFocusTempDB();
+    const entry = {
+        timestamp: new Date().toISOString(),
+        profileId: profileId,
+        temperature: parseFloat(temperature.toFixed(2)),
+        position: position,
+        hfr: parseFloat(hfr.toFixed(3))
+    };
+
+    db.entries.push(entry);
+
+    // Keep last 500 entries per profile to prevent unlimited growth
+    const profileEntries = db.entries.filter(e => e.profileId === profileId);
+    if (profileEntries.length > 500) {
+        const entriesToRemove = profileEntries.slice(0, profileEntries.length - 500);
+        db.entries = db.entries.filter(e => !entriesToRemove.includes(e));
+    }
+
+    // Recalculate temperature coefficient for this profile
+    db.coefficients[profileId] = calculateTempCoefficient(db.entries, profileId);
+
+    saveFocusTempDB(db);
+
+    console.log(`[FocusTemp] Logged: ${temperature.toFixed(1)}°C -> position ${position} (HFR: ${hfr.toFixed(2)})`);
+    return entry;
+}
+
+// Calculate temperature coefficient (steps per degree C) using linear regression
+function calculateTempCoefficient(entries, profileId) {
+    const profileEntries = entries.filter(e => e.profileId === profileId);
+
+    if (profileEntries.length < 3) {
+        return { slope: 0, intercept: 0, r2: 0, samples: profileEntries.length };
+    }
+
+    // Linear regression: position = slope * temperature + intercept
+    const n = profileEntries.length;
+    let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, sumY2 = 0;
+
+    for (const e of profileEntries) {
+        sumX += e.temperature;
+        sumY += e.position;
+        sumXY += e.temperature * e.position;
+        sumX2 += e.temperature * e.temperature;
+        sumY2 += e.position * e.position;
+    }
+
+    const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+    const intercept = (sumY - slope * sumX) / n;
+
+    // R-squared (coefficient of determination)
+    const yMean = sumY / n;
+    let ssRes = 0, ssTot = 0;
+    for (const e of profileEntries) {
+        const predicted = slope * e.temperature + intercept;
+        ssRes += Math.pow(e.position - predicted, 2);
+        ssTot += Math.pow(e.position - yMean, 2);
+    }
+    const r2 = ssTot > 0 ? 1 - (ssRes / ssTot) : 0;
+
+    return {
+        slope: parseFloat(slope.toFixed(2)),        // steps per °C
+        intercept: parseFloat(intercept.toFixed(0)),
+        r2: parseFloat(r2.toFixed(3)),              // correlation quality (1.0 = perfect)
+        samples: n,
+        tempRange: {
+            min: Math.min(...profileEntries.map(e => e.temperature)),
+            max: Math.max(...profileEntries.map(e => e.temperature))
+        }
+    };
+}
+
+// Predict best focus position for a given temperature
+function predictFocusPosition(profileId, temperature) {
+    const db = loadFocusTempDB();
+    const coeff = db.coefficients[profileId];
+
+    if (!coeff || coeff.samples < 3 || coeff.r2 < 0.5) {
+        // Not enough data or poor correlation - return null
+        return null;
+    }
+
+    const predicted = Math.round(coeff.slope * temperature + coeff.intercept);
+
+    return {
+        position: predicted,
+        confidence: coeff.r2,
+        basedOnSamples: coeff.samples,
+        slope: coeff.slope  // steps per °C
+    };
+}
+
+// Get focus temperature stats for a profile
+function getFocusTempStats(profileId) {
+    const db = loadFocusTempDB();
+    const entries = db.entries.filter(e => e.profileId === profileId);
+    const coeff = db.coefficients[profileId] || { slope: 0, intercept: 0, r2: 0, samples: 0 };
+
+    return {
+        entries: entries.slice(-50),  // Last 50 entries
+        coefficient: coeff,
+        totalSamples: entries.length
+    };
+}
+
+// ============================================================================
+// END FOCUS TEMPERATURE DATABASE
+// ============================================================================
+
+// Create a default profile template
+function createDefaultProfile(name, scopeType) {
+    const defaults = SCOPE_DEFAULTS[scopeType] || SCOPE_DEFAULTS.Refractor;
+    const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+    return {
+        id: id,
+        name: name,
+        scopeType: scopeType,
+        focuserDevice: 'Pegasus FocusCube',
+
+        // Direction settings
+        reverseDirection: false,
+        preferredFinalDirection: 'FOCUS_INWARD',
+
+        // Asymmetric backlash
+        backlash: {
+            inwardToOutward: 0,
+            outwardToInward: 0
+        },
+
+        // Autofocus parameters
+        stepSize: defaults.stepSize,
+        settleTime: defaults.settleTime,
+        exposureTime: 2,
+
+        // Optical config
+        opticalConfig: { focalLength: 0, aperture: 0, fRatio: 0 },
+        cfzSteps: 0,
+
+        // Travel limits
+        travelRange: { min: 0, max: 50000 },
+
+        // Metadata
+        created: new Date().toISOString(),
+        lastModified: new Date().toISOString()
+    };
+}
+
+// Calculate Critical Focus Zone (CFZ) in steps
+function calculateCFZ(profile) {
+    if (!profile.opticalConfig || !profile.opticalConfig.fRatio) return 0;
+    // CFZ = 2.2 × f² × wavelength (in microns)
+    // For green light (~0.55 microns) and typical step size
+    const wavelength = 0.55; // microns
+    const cfzMicrons = 2.2 * Math.pow(profile.opticalConfig.fRatio, 2) * wavelength;
+    // Convert to steps (assuming ~10 microns per step typical focuser)
+    const micronsPerStep = 10; // This should ideally come from focuser specs
+    return Math.round(cfzMicrons / micronsPerStep);
+}
+
+// Automated profiling routine
+async function runProfilingRoutine(profile) {
+    const scopeDefaults = SCOPE_DEFAULTS[profile.scopeType] || SCOPE_DEFAULTS.Refractor;
+
+    profilingState = {
+        active: true,
+        phase: 'initializing',
+        progress: 0,
+        message: 'Starting profiling routine...',
+        measurements: [],
+        error: null
+    };
+
+    log(`[Focuser] Starting profiling for ${profile.name} (${profile.scopeType})`);
+
+    try {
+        // ---- Phase 0: Slew to star-rich field ----
+        profilingState.phase = 'slewing';
+        profilingState.progress = 2;
+        profilingState.message = 'Finding star-rich field...';
+        log('[Focuser] Phase 0: Slewing to star-rich field');
+
+        // Get ranked targets and find one that's up with good altitude
+        const rankedTargets = getRankedTargets(OBSERVATORY.latitude, OBSERVATORY.longitude);
+
+        // Filter for targets above 40° altitude, prefer star clusters or galactic targets
+        let targetField = null;
+        for (const target of rankedTargets) {
+            if (target.altitude >= 40) {
+                // Prefer open clusters (good star density) or any target above 40°
+                targetField = target;
+                break;
+            }
+        }
+
+        if (!targetField) {
+            // Fallback: use the highest target available above 30°
+            targetField = rankedTargets.find(t => t.altitude >= 30);
+        }
+
+        if (targetField) {
+            log(`[Focuser] Slewing to ${targetField.name} (Alt: ${targetField.altitude.toFixed(1)}°)`);
+            profilingState.message = `Slewing to ${targetField.name}...`;
+
+            await indi.mountSlew(targetField.ra_decimal, targetField.dec_decimal);
+            log(`[Focuser] Arrived at ${targetField.name}`);
+        } else {
+            log('[Focuser] Warning: No suitable target found above 30°, using current position');
+        }
+
+        profilingState.progress = 8;
+
+        // Get current focuser position
+        const focusState = indi.getState();
+        const startPosition = focusState['Pegasus FocusCube']?.position || 25000;
+        let currentPosition = startPosition;
+
+        // ---- Phase 1: Rough Focus (find stars) ----
+        profilingState.phase = 'rough_focus';
+        profilingState.progress = 10;
+        profilingState.message = 'Finding rough focus...';
+        log('[Focuser] Phase 1: Finding rough focus');
+
+        // Scan through focus range to find stars
+        const scanStep = scopeDefaults.stepSize * 5; // Coarse steps
+        const scanRange = 3000;
+        const scanStart = startPosition - scanRange / 2;
+        let bestHFR = 999;
+        let bestPos = startPosition;
+
+        for (let pos = scanStart; pos <= scanStart + scanRange && profilingState.active; pos += scanStep) {
+            await indi.focuserMove(pos);
+            await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
+
+            // Take short exposure
+            await indi.cameraExpose('camera_main', 2);
+
+            // Simulated HFR measurement (in production, would analyze actual image)
+            const distFromOptimal = Math.abs(pos - startPosition);
+            const simulatedHFR = 2.0 + (distFromOptimal / 1000) * 4;
+
+            if (simulatedHFR < bestHFR) {
+                bestHFR = simulatedHFR;
+                bestPos = pos;
+            }
+
+            profilingState.progress = 10 + ((pos - scanStart) / scanRange) * 15;
+        }
+
+        if (!profilingState.active) throw new Error('Profiling aborted');
+
+        // Move to best rough focus
+        await indi.focuserMove(bestPos);
+        currentPosition = bestPos;
+        log(`[Focuser] Rough focus found at position ${bestPos}`);
+
+        // ---- Phase 2: Measure Inward-to-Outward Backlash ----
+        profilingState.phase = 'backlash_in_to_out';
+        profilingState.progress = 30;
+        profilingState.message = 'Measuring inward-to-outward backlash...';
+        log('[Focuser] Phase 2: Measuring inward-to-outward backlash');
+
+        const backlashMeasurements = { inToOut: [], outToIn: [] };
+
+        for (let trial = 0; trial < 3 && profilingState.active; trial++) {
+            // Move inward
+            const inwardPos = currentPosition - scopeDefaults.testDistance;
+            await indi.focuserMove(inwardPos);
+            await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
+
+            // Take reference exposure
+            await indi.cameraExpose('camera_main', profile.exposureTime);
+            // Simulated reference HFR
+            const refHFR = 2.5;
+
+            // Start moving outward in small increments until HFR changes
+            let deadSteps = 0;
+            const increment = 15;
+            for (let step = 0; step < scopeDefaults.maxBacklash && profilingState.active; step += increment) {
+                await indi.focuserMove(inwardPos + step);
+                await new Promise(r => setTimeout(r, 500));
+                await indi.cameraExpose('camera_main', profile.exposureTime);
+
+                // Simulated HFR check
+                const currentHFR = 2.5 + (step > 50 ? (step - 50) / 200 : 0);
+                if (Math.abs(currentHFR - refHFR) / refHFR > 0.05) {
+                    deadSteps = step;
+                    break;
+                }
+                deadSteps = step;
+            }
+
+            backlashMeasurements.inToOut.push(deadSteps);
+            profilingState.progress = 30 + ((trial + 1) / 3) * 10;
+        }
+
+        if (!profilingState.active) throw new Error('Profiling aborted');
+
+        // ---- Phase 3: Measure Outward-to-Inward Backlash ----
+        profilingState.phase = 'backlash_out_to_in';
+        profilingState.progress = 45;
+        profilingState.message = 'Measuring outward-to-inward backlash...';
+        log('[Focuser] Phase 3: Measuring outward-to-inward backlash');
+
+        // Reset position
+        await indi.focuserMove(currentPosition);
+        await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
+
+        for (let trial = 0; trial < 3 && profilingState.active; trial++) {
+            // Move outward
+            const outwardPos = currentPosition + scopeDefaults.testDistance;
+            await indi.focuserMove(outwardPos);
+            await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
+
+            // Take reference exposure
+            await indi.cameraExpose('camera_main', profile.exposureTime);
+            const refHFR = 2.5;
+
+            // Start moving inward in small increments
+            let deadSteps = 0;
+            const increment = 15;
+            for (let step = 0; step < scopeDefaults.maxBacklash && profilingState.active; step += increment) {
+                await indi.focuserMove(outwardPos - step);
+                await new Promise(r => setTimeout(r, 500));
+                await indi.cameraExpose('camera_main', profile.exposureTime);
+
+                const currentHFR = 2.5 + (step > 70 ? (step - 70) / 200 : 0);
+                if (Math.abs(currentHFR - refHFR) / refHFR > 0.05) {
+                    deadSteps = step;
+                    break;
+                }
+                deadSteps = step;
+            }
+
+            backlashMeasurements.outToIn.push(deadSteps);
+            profilingState.progress = 45 + ((trial + 1) / 3) * 10;
+        }
+
+        if (!profilingState.active) throw new Error('Profiling aborted');
+
+        // Calculate median backlash values
+        const median = arr => {
+            const sorted = [...arr].sort((a, b) => a - b);
+            return sorted[Math.floor(sorted.length / 2)];
+        };
+
+        const inToOutBacklash = median(backlashMeasurements.inToOut);
+        const outToInBacklash = median(backlashMeasurements.outToIn);
+
+        log(`[Focuser] Backlash measured: IN→OUT=${inToOutBacklash}, OUT→IN=${outToInBacklash}`);
+
+        // ---- Phase 4: Determine optimal step size ----
+        profilingState.phase = 'step_size';
+        profilingState.progress = 65;
+        profilingState.message = 'Determining optimal step size...';
+        log('[Focuser] Phase 4: Determining step size');
+
+        // Return to focus
+        await indi.focuserMove(currentPosition);
+        await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
+
+        // Find minimum step that produces measurable HFR change
+        let optimalStepSize = scopeDefaults.stepSize;
+        for (const testStep of [25, 50, 75, 100, 150, 200]) {
+            if (!profilingState.active) break;
+
+            await indi.cameraExpose('camera_main', profile.exposureTime);
+            const hfr1 = 2.0; // Simulated
+
+            await indi.focuserMove(currentPosition + testStep);
+            await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
+            await indi.cameraExpose('camera_main', profile.exposureTime);
+            const hfr2 = 2.0 + testStep / 500; // Simulated
+
+            if (Math.abs(hfr2 - hfr1) > 0.1) {
+                optimalStepSize = testStep;
+                log(`[Focuser] Optimal step size found: ${testStep}`);
+                break;
+            }
+
+            await indi.focuserMove(currentPosition);
+        }
+
+        if (!profilingState.active) throw new Error('Profiling aborted');
+
+        // ---- Phase 5: Update profile ----
+        profilingState.phase = 'saving';
+        profilingState.progress = 90;
+        profilingState.message = 'Saving profile...';
+
+        profile.backlash = {
+            inwardToOutward: inToOutBacklash,
+            outwardToInward: outToInBacklash
+        };
+        profile.stepSize = optimalStepSize;
+        profile.cfzSteps = calculateCFZ(profile);
+        profile.lastModified = new Date().toISOString();
+
+        saveProfile(profile);
+
+        // Update active profile if this is it
+        if (activeFocuserProfile && activeFocuserProfile.id === profile.id) {
+            activeFocuserProfile = profile;
+        }
+
+        // Return to original position
+        await indi.focuserMove(startPosition);
+
+        profilingState.phase = 'complete';
+        profilingState.progress = 100;
+        profilingState.message = 'Profiling complete!';
+        profilingState.active = false;
+
+        log(`[Focuser] Profiling complete for ${profile.name}`);
+        log(`[Focuser] Results: Backlash IN→OUT=${inToOutBacklash}, OUT→IN=${outToInBacklash}, Step=${optimalStepSize}`);
+
+    } catch (err) {
+        profilingState.error = err.message;
+        profilingState.phase = 'error';
+        profilingState.active = false;
+        log(`[Focuser] Profiling error: ${err.message}`);
+        throw err;
+    }
+}
+
+// ============================================================================
+// END FOCUSER PROFILING SYSTEM
+// ============================================================================
+
 function log(message) {
     const timestamp = new Date().toISOString();
     const entry = { timestamp, message };
@@ -1018,6 +1646,156 @@ const HTML = `<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- Focuser Profiles Panel -->
+        <div class="panel" style="margin-top: 20px;">
+            <h2 style="display: flex; align-items: center; justify-content: space-between;">
+                <span>Focuser Profiles</span>
+                <button onclick="showProfileModal()" class="btn btn-primary" style="font-size: 0.75rem; padding: 6px 12px;">+ New Profile</button>
+            </h2>
+            <div style="display: flex; gap: 15px; align-items: flex-start; flex-wrap: wrap;">
+                <!-- Profile Selector -->
+                <div style="flex: 1; min-width: 200px;">
+                    <label style="font-size: 0.75rem; color: var(--text-muted); display: block; margin-bottom: 5px;">Active Profile</label>
+                    <select id="profileSelect" onchange="selectProfile(this.value)" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px; font-size: 0.9rem;">
+                        <option value="">-- No Profile --</option>
+                    </select>
+                </div>
+
+                <!-- Profile Details -->
+                <div id="profileDetails" style="flex: 2; min-width: 300px; display: none;">
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px;">
+                        <div class="device">
+                            <span class="device-name">Scope Type</span>
+                            <span id="profileScopeType" style="color: var(--cyan);">--</span>
+                        </div>
+                        <div class="device">
+                            <span class="device-name">Step Size</span>
+                            <span id="profileStepSize" style="color: var(--cyan);">--</span>
+                        </div>
+                        <div class="device">
+                            <span class="device-name">Backlash IN→OUT</span>
+                            <span id="profileBacklashIn" style="color: var(--gold);">--</span>
+                        </div>
+                        <div class="device">
+                            <span class="device-name">Backlash OUT→IN</span>
+                            <span id="profileBacklashOut" style="color: var(--gold);">--</span>
+                        </div>
+                        <div class="device">
+                            <span class="device-name">Reverse Direction</span>
+                            <span id="profileReverse" style="color: var(--text-muted);">--</span>
+                        </div>
+                        <div class="device">
+                            <span class="device-name">Final Direction</span>
+                            <span id="profileFinalDir" style="color: var(--text-muted);">--</span>
+                        </div>
+                    </div>
+                    <div style="margin-top: 12px; display: flex; gap: 10px;">
+                        <button onclick="editProfile()" class="btn btn-primary" style="font-size: 0.75rem; padding: 6px 12px;">Edit</button>
+                        <button onclick="runProfileRoutine()" class="btn btn-success" style="font-size: 0.75rem; padding: 6px 12px;">Run Profiling</button>
+                        <button onclick="deleteCurrentProfile()" class="btn btn-danger" style="font-size: 0.75rem; padding: 6px 12px;">Delete</button>
+                    </div>
+                </div>
+
+                <!-- Profiling Progress -->
+                <div id="profilingProgress" style="flex: 1; min-width: 200px; display: none;">
+                    <div style="font-size: 0.85rem; color: var(--accent2); margin-bottom: 8px;">
+                        <span id="profilingPhase">--</span>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.4); border-radius: 10px; height: 10px; overflow: hidden;">
+                        <div id="profilingBar" style="background: linear-gradient(90deg, var(--accent), var(--accent2)); height: 100%; width: 0%; transition: width 0.3s;"></div>
+                    </div>
+                    <div id="profilingMessage" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 5px;">--</div>
+                    <button onclick="abortProfiling()" class="btn btn-danger" style="font-size: 0.75rem; padding: 4px 10px; margin-top: 8px;">Abort</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Profile Edit Modal -->
+        <div id="profileModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 9999; align-items: center; justify-content: center;">
+            <div style="background: var(--surface); border: 1px solid rgba(255,255,255,0.1); border-radius: 15px; padding: 25px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto;">
+                <h2 id="modalTitle" style="margin-bottom: 20px;">New Focuser Profile</h2>
+                <form id="profileForm" onsubmit="saveProfileForm(event)">
+                    <input type="hidden" id="editProfileId">
+
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">Profile Name</label>
+                        <input type="text" id="profileName" required style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">Scope Type</label>
+                        <select id="scopeType" required onchange="updateScopeDefaults()" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                            <option value="Refractor">Refractor</option>
+                            <option value="Newtonian">Newtonian</option>
+                            <option value="SCT">SCT (Schmidt-Cassegrain)</option>
+                            <option value="RC">RC (Ritchey-Chretien)</option>
+                        </select>
+                    </div>
+
+                    <div id="sctSettings" style="display: none; padding: 15px; background: rgba(168, 85, 247, 0.1); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; margin-bottom: 15px;">
+                        <h3 style="font-size: 0.9rem; color: var(--accent2); margin-bottom: 10px;">SCT Mirror Settings</h3>
+
+                        <div style="margin-bottom: 10px;">
+                            <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                                <input type="checkbox" id="reverseDirection" style="width: 18px; height: 18px;">
+                                <span style="font-size: 0.85rem;">Reverse Direction (for backwards-wired focusers)</span>
+                            </label>
+                        </div>
+
+                        <div>
+                            <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">Preferred Final Direction</label>
+                            <select id="finalDirection" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                                <option value="FOCUS_INWARD">Inward (push mirror against gravity)</option>
+                                <option value="FOCUS_OUTWARD">Outward</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                        <div>
+                            <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">Step Size</label>
+                            <input type="number" id="stepSize" value="100" min="10" max="500" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        </div>
+                        <div>
+                            <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">Settle Time (ms)</label>
+                            <input type="number" id="settleTime" value="1500" min="500" max="5000" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        </div>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                        <div>
+                            <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">Backlash IN→OUT</label>
+                            <input type="number" id="backlashIn" value="0" min="0" max="500" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        </div>
+                        <div>
+                            <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">Backlash OUT→IN</label>
+                            <input type="number" id="backlashOut" value="0" min="0" max="500" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        </div>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                        <div>
+                            <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">Focal Length (mm)</label>
+                            <input type="number" id="focalLength" value="0" min="0" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        </div>
+                        <div>
+                            <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">Aperture (mm)</label>
+                            <input type="number" id="aperture" value="0" min="0" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        </div>
+                        <div>
+                            <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 5px;">f/Ratio</label>
+                            <input type="number" id="fRatio" value="0" min="0" step="0.1" style="width: 100%; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        </div>
+                    </div>
+
+                    <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                        <button type="button" onclick="closeProfileModal()" class="btn" style="background: rgba(255,255,255,0.1);">Cancel</button>
+                        <button type="submit" class="btn btn-success">Save Profile</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
         <!-- Image Transfer Section -->
         <div class="panel" style="margin-top: 20px;">
             <h2>Image Transfer</h2>
@@ -1046,6 +1824,58 @@ const HTML = `<!DOCTYPE html>
                 </div>
                 <div style="margin-left: auto; font-size: 0.8rem; color: var(--text-muted);">
                     Last update: <span id="roofLastUpdate">--</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mount Control Panel -->
+        <div class="panel" style="margin-top: 20px;">
+            <h2>Mount Control</h2>
+            <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start;">
+                <!-- Mount Status -->
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; min-width: 200px;">
+                    <div class="device">
+                        <span class="device-name">Status</span>
+                        <span id="mountStatus" style="color: var(--text-muted);">--</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">Tracking</span>
+                        <span id="mountTracking" style="color: var(--text-muted);">--</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">RA</span>
+                        <span id="mountRA" style="color: var(--cyan); font-family: monospace;">--</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">Dec</span>
+                        <span id="mountDec" style="color: var(--cyan); font-family: monospace;">--</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">Alt</span>
+                        <span id="mountAlt" style="color: var(--green); font-family: monospace;">--</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">Az</span>
+                        <span id="mountAz" style="color: var(--green); font-family: monospace;">--</span>
+                    </div>
+                </div>
+
+                <!-- Slew Control -->
+                <div style="flex: 1;">
+                    <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 5px;">Slew to Target</label>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <input type="text" id="slewTarget" placeholder="Target name (e.g., M31, NGC7000) or RA,Dec"
+                               style="flex: 1; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 8px; font-size: 0.9rem;">
+                        <button onclick="checkSlewTarget()" class="btn btn-primary" style="white-space: nowrap;">Check</button>
+                        <button onclick="slewToTarget()" class="btn btn-success" style="white-space: nowrap;">Slew</button>
+                    </div>
+                    <div id="slewResult" style="margin-top: 8px; font-size: 0.8rem; color: var(--text-muted);"></div>
+                </div>
+
+                <!-- Park/Unpark -->
+                <div style="display: flex; flex-direction: column; gap: 10px;">
+                    <button onclick="unparkMount()" class="btn btn-success" style="min-width: 100px;">Unpark</button>
+                    <button onclick="parkMount()" class="btn btn-danger" style="min-width: 100px;">Park</button>
                 </div>
             </div>
         </div>
@@ -2144,6 +2974,172 @@ const HTML = `<!DOCTYPE html>
         window.syncImages = syncImages;
 
         // ========================================
+        // ========================================
+        // Mount Control Functions
+        // ========================================
+
+        async function fetchMountStatus() {
+            try {
+                const resp = await fetch('/api/mount/status');
+                if (resp.ok) {
+                    const data = await resp.json();
+
+                    // Status
+                    const statusEl = document.getElementById('mountStatus');
+                    if (data.parked) {
+                        statusEl.textContent = 'PARKED';
+                        statusEl.style.color = 'var(--gold)';
+                    } else if (data.connected) {
+                        statusEl.textContent = 'READY';
+                        statusEl.style.color = 'var(--green)';
+                    } else {
+                        statusEl.textContent = 'DISCONNECTED';
+                        statusEl.style.color = 'var(--red)';
+                    }
+
+                    // Tracking
+                    const trackEl = document.getElementById('mountTracking');
+                    trackEl.textContent = data.tracking ? 'ON' : 'OFF';
+                    trackEl.style.color = data.tracking ? 'var(--green)' : 'var(--text-muted)';
+
+                    // Coordinates
+                    if (data.ra !== undefined) {
+                        const raH = Math.floor(data.ra);
+                        const raM = Math.floor((data.ra - raH) * 60);
+                        const raS = ((data.ra - raH) * 60 - raM) * 60;
+                        document.getElementById('mountRA').textContent = raH + 'h ' + raM + 'm ' + raS.toFixed(1) + 's';
+                    }
+                    if (data.dec !== undefined) {
+                        const sign = data.dec >= 0 ? '+' : '';
+                        document.getElementById('mountDec').textContent = sign + data.dec.toFixed(4) + '°';
+                    }
+                    if (data.alt !== null && data.alt !== undefined) {
+                        document.getElementById('mountAlt').textContent = data.alt.toFixed(1) + '°';
+                        document.getElementById('mountAlt').style.color = data.alt < 15 ? 'var(--red)' : 'var(--green)';
+                    }
+                    if (data.az !== null && data.az !== undefined) {
+                        document.getElementById('mountAz').textContent = data.az.toFixed(1) + '°';
+                    }
+                }
+            } catch (e) {
+                console.error('Mount status error:', e);
+            }
+        }
+
+        async function checkSlewTarget() {
+            const input = document.getElementById('slewTarget').value.trim();
+            const resultEl = document.getElementById('slewResult');
+
+            if (!input) {
+                resultEl.innerHTML = '<span style="color: var(--red);">Enter a target name or coordinates</span>';
+                return;
+            }
+
+            resultEl.innerHTML = '<span style="color: var(--gold);">Checking...</span>';
+
+            try {
+                // Check if input looks like coordinates (contains comma)
+                let url;
+                if (input.includes(',')) {
+                    const parts = input.split(',').map(s => s.trim());
+                    url = '/api/mount/check-target?ra=' + encodeURIComponent(parts[0]) + '&dec=' + encodeURIComponent(parts[1]);
+                } else {
+                    url = '/api/mount/check-target?target=' + encodeURIComponent(input);
+                }
+
+                const resp = await fetch(url);
+                const data = await resp.json();
+
+                if (data.success) {
+                    if (data.safe) {
+                        resultEl.innerHTML = '<span style="color: var(--green);">✓ ' + data.target + ' - Alt: ' + data.altitude.toFixed(1) + '°, Az: ' + data.azimuth.toFixed(1) + '° - SAFE TO SLEW</span>';
+                    } else {
+                        resultEl.innerHTML = '<span style="color: var(--red);">✗ ' + data.target + ' - Alt: ' + data.altitude.toFixed(1) + '° - TOO LOW</span>';
+                    }
+                } else {
+                    resultEl.innerHTML = '<span style="color: var(--red);">' + (data.error || 'Unknown error') + '</span>';
+                }
+            } catch (e) {
+                resultEl.innerHTML = '<span style="color: var(--red);">Error: ' + e.message + '</span>';
+            }
+        }
+        window.checkSlewTarget = checkSlewTarget;
+
+        async function slewToTarget() {
+            const input = document.getElementById('slewTarget').value.trim();
+            const resultEl = document.getElementById('slewResult');
+
+            if (!input) {
+                resultEl.innerHTML = '<span style="color: var(--red);">Enter a target name or coordinates</span>';
+                return;
+            }
+
+            resultEl.innerHTML = '<span style="color: var(--gold);">Slewing...</span>';
+
+            try {
+                let body;
+                if (input.includes(',')) {
+                    const parts = input.split(',').map(s => s.trim());
+                    body = JSON.stringify({ ra: parseFloat(parts[0]), dec: parseFloat(parts[1]) });
+                } else {
+                    body = JSON.stringify({ target: input });
+                }
+
+                const resp = await fetch('/api/mount/slew', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: body
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    resultEl.innerHTML = '<span style="color: var(--green);">✓ Slewed to ' + data.target + ' (Alt: ' + data.altitude.toFixed(1) + '°)</span>';
+                    fetchMountStatus();
+                } else {
+                    resultEl.innerHTML = '<span style="color: var(--red);">' + (data.error || 'Slew failed') + '</span>';
+                }
+            } catch (e) {
+                resultEl.innerHTML = '<span style="color: var(--red);">Error: ' + e.message + '</span>';
+            }
+        }
+        window.slewToTarget = slewToTarget;
+
+        async function parkMount() {
+            if (!confirm('Park the mount?')) return;
+            try {
+                const resp = await fetch('/api/mount/park', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    fetchMountStatus();
+                } else {
+                    alert('Park failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (e) {
+                alert('Park error: ' + e.message);
+            }
+        }
+        window.parkMount = parkMount;
+
+        async function unparkMount() {
+            try {
+                const resp = await fetch('/api/mount/unpark', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    fetchMountStatus();
+                } else {
+                    alert('Unpark failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (e) {
+                alert('Unpark error: ' + e.message);
+            }
+        }
+        window.unparkMount = unparkMount;
+
+        // Poll mount status
+        fetchMountStatus();
+        setInterval(fetchMountStatus, 5000);
+
+        // ========================================
         // Roof Control Functions
         // ========================================
         async function fetchRoofStatus() {
@@ -2344,6 +3340,268 @@ const HTML = `<!DOCTYPE html>
             document.getElementById('imageViewer').style.display = 'none';
         }
         window.closeImageViewer = closeImageViewer;
+
+        // =====================================================================
+        // FOCUSER PROFILE MANAGEMENT
+        // =====================================================================
+
+        let currentProfileData = null;
+        let profiles = [];
+
+        // Load profiles on start
+        async function loadProfiles() {
+            try {
+                const resp = await fetch('/api/focuser/profiles');
+                const data = await resp.json();
+                if (data.success) {
+                    profiles = data.profiles || [];
+                    const select = document.getElementById('profileSelect');
+                    select.innerHTML = '<option value="">-- No Profile --</option>';
+                    profiles.forEach(p => {
+                        const opt = document.createElement('option');
+                        opt.value = p.id;
+                        opt.textContent = p.name + ' (' + p.scopeType + ')';
+                        if (p.id === data.activeProfile) {
+                            opt.selected = true;
+                            loadProfileDetails(p.id);
+                        }
+                        select.appendChild(opt);
+                    });
+                }
+            } catch (e) {
+                console.error('Failed to load profiles:', e);
+            }
+        }
+
+        async function loadProfileDetails(profileId) {
+            if (!profileId) {
+                document.getElementById('profileDetails').style.display = 'none';
+                currentProfileData = null;
+                return;
+            }
+            try {
+                const resp = await fetch('/api/focuser/profiles/' + profileId);
+                const data = await resp.json();
+                if (data.success && data.profile) {
+                    currentProfileData = data.profile;
+                    document.getElementById('profileDetails').style.display = 'block';
+                    document.getElementById('profileScopeType').textContent = data.profile.scopeType;
+                    document.getElementById('profileStepSize').textContent = data.profile.stepSize + ' steps';
+                    document.getElementById('profileBacklashIn').textContent = data.profile.backlash?.inwardToOutward || 0;
+                    document.getElementById('profileBacklashOut').textContent = data.profile.backlash?.outwardToInward || 0;
+                    document.getElementById('profileReverse').textContent = data.profile.reverseDirection ? 'Yes' : 'No';
+                    document.getElementById('profileFinalDir').textContent = data.profile.preferredFinalDirection === 'FOCUS_INWARD' ? 'Inward' : 'Outward';
+                }
+            } catch (e) {
+                console.error('Failed to load profile details:', e);
+            }
+        }
+
+        async function selectProfile(profileId) {
+            if (!profileId) {
+                document.getElementById('profileDetails').style.display = 'none';
+                currentProfileData = null;
+                return;
+            }
+            try {
+                await fetch('/api/focuser/profiles/active', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profileId })
+                });
+                loadProfileDetails(profileId);
+            } catch (e) {
+                console.error('Failed to set active profile:', e);
+            }
+        }
+        window.selectProfile = selectProfile;
+
+        function showProfileModal(editMode = false) {
+            document.getElementById('profileModal').style.display = 'flex';
+            document.getElementById('modalTitle').textContent = editMode ? 'Edit Focuser Profile' : 'New Focuser Profile';
+            if (!editMode) {
+                document.getElementById('profileForm').reset();
+                document.getElementById('editProfileId').value = '';
+                updateScopeDefaults();
+            }
+        }
+        window.showProfileModal = showProfileModal;
+
+        function closeProfileModal() {
+            document.getElementById('profileModal').style.display = 'none';
+        }
+        window.closeProfileModal = closeProfileModal;
+
+        function updateScopeDefaults() {
+            const scopeType = document.getElementById('scopeType').value;
+            const sctSettings = document.getElementById('sctSettings');
+            sctSettings.style.display = (scopeType === 'SCT' || scopeType === 'RC') ? 'block' : 'none';
+
+            // Set defaults based on scope type
+            const defaults = {
+                Refractor: { stepSize: 100, settleTime: 1500 },
+                Newtonian: { stepSize: 100, settleTime: 1500 },
+                SCT: { stepSize: 150, settleTime: 2500 },
+                RC: { stepSize: 120, settleTime: 2000 }
+            };
+            const d = defaults[scopeType] || defaults.Refractor;
+            if (!document.getElementById('editProfileId').value) {
+                document.getElementById('stepSize').value = d.stepSize;
+                document.getElementById('settleTime').value = d.settleTime;
+            }
+        }
+        window.updateScopeDefaults = updateScopeDefaults;
+
+        async function saveProfileForm(e) {
+            e.preventDefault();
+            const editId = document.getElementById('editProfileId').value;
+            const profileData = {
+                name: document.getElementById('profileName').value,
+                scopeType: document.getElementById('scopeType').value,
+                reverseDirection: document.getElementById('reverseDirection').checked,
+                preferredFinalDirection: document.getElementById('finalDirection').value,
+                stepSize: parseInt(document.getElementById('stepSize').value),
+                settleTime: parseInt(document.getElementById('settleTime').value),
+                backlash: {
+                    inwardToOutward: parseInt(document.getElementById('backlashIn').value),
+                    outwardToInward: parseInt(document.getElementById('backlashOut').value)
+                },
+                opticalConfig: {
+                    focalLength: parseInt(document.getElementById('focalLength').value),
+                    aperture: parseInt(document.getElementById('aperture').value),
+                    fRatio: parseFloat(document.getElementById('fRatio').value)
+                }
+            };
+
+            try {
+                let resp;
+                if (editId) {
+                    resp = await fetch('/api/focuser/profiles/' + editId, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(profileData)
+                    });
+                } else {
+                    resp = await fetch('/api/focuser/profiles', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(profileData)
+                    });
+                }
+                const data = await resp.json();
+                if (data.success) {
+                    closeProfileModal();
+                    loadProfiles();
+                    if (data.profile) {
+                        document.getElementById('profileSelect').value = data.profile.id;
+                        selectProfile(data.profile.id);
+                    }
+                } else {
+                    alert('Error: ' + (data.error || 'Failed to save profile'));
+                }
+            } catch (e) {
+                alert('Error saving profile: ' + e.message);
+            }
+        }
+        window.saveProfileForm = saveProfileForm;
+
+        function editProfile() {
+            if (!currentProfileData) return;
+            document.getElementById('editProfileId').value = currentProfileData.id;
+            document.getElementById('profileName').value = currentProfileData.name;
+            document.getElementById('scopeType').value = currentProfileData.scopeType;
+            document.getElementById('reverseDirection').checked = currentProfileData.reverseDirection || false;
+            document.getElementById('finalDirection').value = currentProfileData.preferredFinalDirection || 'FOCUS_INWARD';
+            document.getElementById('stepSize').value = currentProfileData.stepSize || 100;
+            document.getElementById('settleTime').value = currentProfileData.settleTime || 1500;
+            document.getElementById('backlashIn').value = currentProfileData.backlash?.inwardToOutward || 0;
+            document.getElementById('backlashOut').value = currentProfileData.backlash?.outwardToInward || 0;
+            document.getElementById('focalLength').value = currentProfileData.opticalConfig?.focalLength || 0;
+            document.getElementById('aperture').value = currentProfileData.opticalConfig?.aperture || 0;
+            document.getElementById('fRatio').value = currentProfileData.opticalConfig?.fRatio || 0;
+            updateScopeDefaults();
+            showProfileModal(true);
+        }
+        window.editProfile = editProfile;
+
+        async function deleteCurrentProfile() {
+            if (!currentProfileData) return;
+            if (!confirm('Delete profile "' + currentProfileData.name + '"?')) return;
+            try {
+                const resp = await fetch('/api/focuser/profiles/' + currentProfileData.id, { method: 'DELETE' });
+                const data = await resp.json();
+                if (data.success) {
+                    currentProfileData = null;
+                    document.getElementById('profileDetails').style.display = 'none';
+                    loadProfiles();
+                }
+            } catch (e) {
+                alert('Error deleting profile: ' + e.message);
+            }
+        }
+        window.deleteCurrentProfile = deleteCurrentProfile;
+
+        async function runProfileRoutine() {
+            if (!currentProfileData) return;
+            if (!confirm('Run automated profiling for "' + currentProfileData.name + '"? This will move the focuser and take exposures.')) return;
+            try {
+                const resp = await fetch('/api/focuser/profile-routine', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profileId: currentProfileData.id })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    document.getElementById('profilingProgress').style.display = 'block';
+                    pollProfilingStatus();
+                } else {
+                    alert('Error: ' + (data.error || 'Failed to start profiling'));
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+        window.runProfileRoutine = runProfileRoutine;
+
+        async function pollProfilingStatus() {
+            try {
+                const resp = await fetch('/api/focuser/profile-routine/status');
+                const data = await resp.json();
+                document.getElementById('profilingPhase').textContent = data.phase || '--';
+                document.getElementById('profilingBar').style.width = (data.progress || 0) + '%';
+                document.getElementById('profilingMessage').textContent = data.message || '--';
+
+                if (data.active) {
+                    setTimeout(pollProfilingStatus, 1000);
+                } else {
+                    if (data.phase === 'complete') {
+                        loadProfiles();
+                        loadProfileDetails(currentProfileData?.id);
+                    }
+                    setTimeout(() => {
+                        document.getElementById('profilingProgress').style.display = 'none';
+                    }, 3000);
+                }
+            } catch (e) {
+                console.error('Error polling profiling status:', e);
+            }
+        }
+
+        async function abortProfiling() {
+            try {
+                await fetch('/api/focuser/profile-routine/abort', { method: 'POST' });
+            } catch (e) {
+                console.error('Error aborting profiling:', e);
+            }
+        }
+        window.abortProfiling = abortProfiling;
+
+        // Load profiles on start
+        loadProfiles();
+
+        // =====================================================================
+        // END FOCUSER PROFILE MANAGEMENT
+        // =====================================================================
 
         // Load images on start
         refreshImages();
@@ -2762,6 +4020,12 @@ const server = http.createServer(async (req, res) => {
                         try {
                             log('Starting autofocus routine...');
 
+                            // Use active focuser profile if available
+                            const profile = activeFocuserProfile;
+                            if (profile) {
+                                log(`Using focuser profile: ${profile.name} (${profile.scopeType})`);
+                            }
+
                             // Reset autofocus data for live display
                             autofocusData = {
                                 active: true,
@@ -2772,31 +4036,60 @@ const server = http.createServer(async (req, res) => {
                                 timestamp: Date.now()
                             };
 
-                            // Simple autofocus: move focuser through range and find best position
-                            // This is a basic V-curve autofocus implementation
+                            // Get parameters from profile or use defaults
                             const focusState = indi.getState();
-                            const currentPos = focusState['Pegasus FocusCube']?.position || 5000;
-                            const step_size = 100;
+                            const focuserData = focusState['Pegasus FocusCube'] || {};
+                            const currentPos = focuserData.position || 5000;
+                            // Use focuser temp if available, otherwise fall back to ambient from weather sensor
+                            let focuserTemp = focuserData.temperature;
+                            if (focuserTemp === null || focuserTemp === undefined || focuserTemp === 0) {
+                                focuserTemp = focusState.weather?.temperature ?? null;
+                                if (focuserTemp !== null) {
+                                    log(`[FocusTemp] Using ambient temperature from Meteo Sensor: ${focuserTemp.toFixed(1)}°C`);
+                                }
+                            }
+                            const step_size = profile?.stepSize || 100;
+                            const settleTime = profile?.settleTime || 2000;
+                            const exposureTime = profile?.exposureTime || 2;
                             const steps = 11;
-                            const startPos = currentPos - (step_size * Math.floor(steps / 2));
+
+                            // Check for temperature-based prediction
+                            let centerPos = currentPos;
+                            if (profile && focuserTemp !== null && focuserTemp !== undefined) {
+                                const prediction = predictFocusPosition(profile.id, focuserTemp);
+                                if (prediction && prediction.confidence >= 0.7) {
+                                    centerPos = prediction.position;
+                                    log(`[FocusTemp] Using predicted position ${centerPos} for ${focuserTemp.toFixed(1)}°C (confidence: ${(prediction.confidence * 100).toFixed(0)}%, ${prediction.basedOnSamples} samples)`);
+                                } else if (prediction) {
+                                    log(`[FocusTemp] Prediction available but confidence too low (${(prediction.confidence * 100).toFixed(0)}%), using current position`);
+                                }
+                            }
+
+                            const startPos = centerPos - (step_size * Math.floor(steps / 2));
 
                             let bestPos = currentPos;
                             let bestHFD = 999;
 
-                            log(`Autofocus: scanning from ${startPos} to ${startPos + step_size * steps}`);
+                            log(`Autofocus: scanning from ${startPos} to ${startPos + step_size * steps} (step=${step_size})`);
+
+                            // For SCT: scan in one direction only to avoid backlash issues during measurement
+                            const scanDirection = profile?.scopeType === 'SCT' ? 'one_way' : 'sweep';
+                            if (scanDirection === 'one_way' && profile?.scopeType === 'SCT') {
+                                log('SCT mode: scanning in one direction only');
+                            }
 
                             // For each position, take a short exposure and measure HFD
-                            // (In practice, you'd measure actual star HFD from the image)
                             for (let i = 0; i < steps; i++) {
                                 const pos = startPos + (i * step_size);
+
+                                // Move focuser (no backlash compensation during scan to maintain consistency)
                                 await indi.focuserMove(pos);
-                                await new Promise(r => setTimeout(r, 2000)); // Wait for focuser
+                                await new Promise(r => setTimeout(r, settleTime));
 
                                 // Take a short exposure for focus measurement
-                                await indi.cameraExpose('camera_main', 2);
+                                await indi.cameraExpose('camera_main', exposureTime);
 
                                 // Simulated HFD measurement (would analyze actual image)
-                                // V-curve: HFD minimum at best focus
                                 const distFromOptimal = Math.abs(pos - currentPos);
                                 const simulatedHFD = 2.0 + (distFromOptimal / 500) * 3;
 
@@ -2815,7 +4108,6 @@ const server = http.createServer(async (req, res) => {
 
                             // Calculate V-curve slope (for fit line)
                             if (autofocusData.points.length >= 3) {
-                                // Simple slope: average change in HFR per step from best
                                 const leftPoints = autofocusData.points.filter(p => p.position < bestPos);
                                 const rightPoints = autofocusData.points.filter(p => p.position > bestPos);
                                 let totalSlope = 0;
@@ -2834,9 +4126,20 @@ const server = http.createServer(async (req, res) => {
                             autofocusData.active = false;
                             autofocusData.timestamp = Date.now();
 
-                            // Move to best position
+                            // Move to best position with backlash compensation
                             log(`Best focus at position ${bestPos} (HFD: ${bestHFD.toFixed(2)})`);
-                            await indi.focuserMove(bestPos);
+
+                            if (profile && profile.scopeType === 'SCT') {
+                                // SCT: use final approach method to seat the mirror properly
+                                log('SCT: Applying final approach from preferred direction');
+                                await indi.focuserFinalApproach(bestPos, profile, settleTime);
+                            } else if (profile && (profile.backlash?.inwardToOutward > 0 || profile.backlash?.outwardToInward > 0)) {
+                                // Non-SCT with backlash: use backlash-compensated move
+                                await indi.focuserMoveWithBacklash(bestPos, profile, settleTime);
+                            } else {
+                                // No profile or no backlash: simple move
+                                await indi.focuserMove(bestPos);
+                            }
 
                             // Save baseline for refocus tracking
                             focusTracking.baselineHFR = bestHFD;
@@ -2844,6 +4147,23 @@ const server = http.createServer(async (req, res) => {
                             focusTracking.lastFocusPosition = bestPos;
                             focusTracking.meridianFlipPending = false;
                             log('Autofocus complete - baseline HFR saved');
+
+                            // Log focus result with temperature for temperature compensation database
+                            if (profile && focuserTemp !== null && focuserTemp !== undefined) {
+                                const logEntry = logFocusResult(profile.id, focuserTemp, bestPos, bestHFD);
+                                if (logEntry) {
+                                    const db = loadFocusTempDB();
+                                    const coeff = db.coefficients[profile.id];
+                                    if (coeff && coeff.samples >= 5) {
+                                        log(`[FocusTemp] Temperature coefficient: ${coeff.slope.toFixed(1)} steps/°C (R²=${coeff.r2.toFixed(2)}, ${coeff.samples} samples)`);
+                                    }
+                                }
+                            }
+
+                            // Log profile used
+                            if (profile) {
+                                log(`Profile applied: step=${step_size}, settle=${settleTime}ms, backlash IN→OUT=${profile.backlash?.inwardToOutward || 0}, OUT→IN=${profile.backlash?.outwardToInward || 0}`);
+                            }
                         } catch (e) {
                             autofocusData.active = false;
                             result = { success: false, error: 'Autofocus failed: ' + e.message };
@@ -3037,23 +4357,28 @@ const server = http.createServer(async (req, res) => {
                                     if (refocusReasons) {
                                         log(`Refocus triggered: ${refocusReasons.join(', ')}`);
 
+                                        // Use active profile for refocus parameters
+                                        const refocusProfile = activeFocuserProfile;
+
                                         // Run quick autofocus routine
                                         const focusState = indi.getState();
                                         const currentPos = focusState['Pegasus FocusCube']?.position || focusTracking.lastFocusPosition || 5000;
-                                        const focusStep = 50;  // Smaller steps for refocus
-                                        const focusSteps = 7;  // Fewer steps
+                                        const focusStep = refocusProfile ? Math.round(refocusProfile.stepSize / 2) : 50;
+                                        const settleTime = refocusProfile?.settleTime || 1500;
+                                        const expTime = refocusProfile?.exposureTime || 2;
+                                        const focusSteps = 7;  // Fewer steps for refocus
                                         const startPos = currentPos - (focusStep * Math.floor(focusSteps / 2));
 
                                         let bestPos = currentPos;
                                         let bestHFD = 999;
 
-                                        log(`Quick refocus: scanning ${startPos} to ${startPos + focusStep * focusSteps}`);
+                                        log(`Quick refocus: scanning ${startPos} to ${startPos + focusStep * focusSteps} (step=${focusStep})`);
 
                                         for (let f = 0; f < focusSteps; f++) {
                                             const pos = startPos + (f * focusStep);
                                             await indi.focuserMove(pos);
-                                            await new Promise(r => setTimeout(r, 1500));
-                                            await indi.cameraExpose('camera_main', 2);
+                                            await new Promise(r => setTimeout(r, settleTime));
+                                            await indi.cameraExpose('camera_main', expTime);
 
                                             const distFromOptimal = Math.abs(pos - currentPos);
                                             const simulatedHFD = 2.0 + (distFromOptimal / 500) * 3;
@@ -3064,7 +4389,15 @@ const server = http.createServer(async (req, res) => {
                                             }
                                         }
 
-                                        await indi.focuserMove(bestPos);
+                                        // Move to best position with backlash compensation if profile exists
+                                        if (refocusProfile && refocusProfile.scopeType === 'SCT') {
+                                            await indi.focuserFinalApproach(bestPos, refocusProfile, settleTime);
+                                        } else if (refocusProfile && (refocusProfile.backlash?.inwardToOutward > 0 || refocusProfile.backlash?.outwardToInward > 0)) {
+                                            await indi.focuserMoveWithBacklash(bestPos, refocusProfile, settleTime);
+                                        } else {
+                                            await indi.focuserMove(bestPos);
+                                        }
+
                                         focusTracking.baselineHFR = bestHFD;
                                         focusTracking.lastFocusTime = Date.now();
                                         focusTracking.lastFocusPosition = bestPos;
@@ -3158,12 +4491,517 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // ========================================================================
+    // FOCUSER PROFILE API ENDPOINTS
+    // ========================================================================
+
+    // GET /api/focuser/profiles - List all profiles
+    if (url.pathname === '/api/focuser/profiles' && req.method === 'GET') {
+        const index = loadProfilesIndex();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            activeProfile: index.activeProfile,
+            profiles: index.profiles
+        }));
+        return;
+    }
+
+    // GET /api/focuser/profiles/:id - Get a specific profile
+    if (url.pathname.match(/^\/api\/focuser\/profiles\/[^\/]+$/) && req.method === 'GET') {
+        const profileId = url.pathname.split('/').pop();
+        const profile = loadProfile(profileId);
+        if (profile) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, profile }));
+        } else {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Profile not found' }));
+        }
+        return;
+    }
+
+    // POST /api/focuser/profiles - Create new profile
+    if (url.pathname === '/api/focuser/profiles' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            try {
+                const { name, scopeType } = JSON.parse(body);
+                if (!name || !scopeType) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'name and scopeType required' }));
+                    return;
+                }
+
+                const profile = createDefaultProfile(name, scopeType);
+
+                // Check for duplicate ID
+                const existing = loadProfile(profile.id);
+                if (existing) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Profile with similar name already exists' }));
+                    return;
+                }
+
+                saveProfile(profile);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, profile }));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // PUT /api/focuser/profiles/active - Set active profile (must be before :id route)
+    if (url.pathname === '/api/focuser/profiles/active' && req.method === 'PUT') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            try {
+                const { profileId } = JSON.parse(body);
+                if (setActiveProfile(profileId)) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, profile: activeFocuserProfile }));
+                } else {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Profile not found' }));
+                }
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // PUT /api/focuser/profiles/:id - Update profile
+    if (url.pathname.match(/^\/api\/focuser\/profiles\/[^\/]+$/) && req.method === 'PUT') {
+        const profileId = url.pathname.split('/').pop();
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            try {
+                const updates = JSON.parse(body);
+                const existing = loadProfile(profileId);
+
+                if (!existing) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Profile not found' }));
+                    return;
+                }
+
+                // Merge updates
+                const updated = { ...existing, ...updates, id: profileId, lastModified: new Date().toISOString() };
+
+                // Recalculate CFZ if optical config changed
+                if (updates.opticalConfig) {
+                    updated.cfzSteps = calculateCFZ(updated);
+                }
+
+                saveProfile(updated);
+
+                // If this is the active profile, update the loaded copy
+                if (activeFocuserProfile && activeFocuserProfile.id === profileId) {
+                    activeFocuserProfile = updated;
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, profile: updated }));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // DELETE /api/focuser/profiles/:id - Delete profile
+    if (url.pathname.match(/^\/api\/focuser\/profiles\/[^\/]+$/) && req.method === 'DELETE') {
+        const profileId = url.pathname.split('/').pop();
+        if (deleteProfile(profileId)) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+        } else {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Failed to delete profile' }));
+        }
+        return;
+    }
+
+    // GET /api/focuser/profile-routine/status - Get profiling routine status
+    if (url.pathname === '/api/focuser/profile-routine/status' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            ...profilingState
+        }));
+        return;
+    }
+
+    // POST /api/focuser/profile-routine - Start automated profiling
+    if (url.pathname === '/api/focuser/profile-routine' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const { profileId } = JSON.parse(body);
+                const profile = loadProfile(profileId);
+
+                if (!profile) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Profile not found' }));
+                    return;
+                }
+
+                if (profilingState.active) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Profiling already in progress' }));
+                    return;
+                }
+
+                // Start profiling routine asynchronously
+                runProfilingRoutine(profile).catch(err => {
+                    console.error('[Focuser] Profiling error:', err);
+                    profilingState.error = err.message;
+                    profilingState.active = false;
+                });
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, message: 'Profiling started' }));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // POST /api/focuser/profile-routine/abort - Abort profiling
+    if (url.pathname === '/api/focuser/profile-routine/abort' && req.method === 'POST') {
+        if (profilingState.active) {
+            profilingState.active = false;
+            profilingState.phase = 'aborted';
+            profilingState.message = 'Profiling aborted by user';
+            log('Focuser profiling aborted');
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+        return;
+    }
+
+    // GET /api/focuser/active-profile - Get currently active profile
+    if (url.pathname === '/api/focuser/active-profile' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            profile: activeFocuserProfile
+        }));
+        return;
+    }
+
+    // GET /api/focuser/temp-stats - Get focus temperature statistics
+    if (url.pathname === '/api/focuser/temp-stats' && req.method === 'GET') {
+        const profileId = url.searchParams.get('profile') || activeFocuserProfile?.id;
+        if (!profileId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'No profile specified or active' }));
+            return;
+        }
+        const stats = getFocusTempStats(profileId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, profileId, ...stats }));
+        return;
+    }
+
+    // GET /api/focuser/temp-predict - Predict focus position for temperature
+    if (url.pathname === '/api/focuser/temp-predict' && req.method === 'GET') {
+        const profileId = url.searchParams.get('profile') || activeFocuserProfile?.id;
+        const temp = parseFloat(url.searchParams.get('temp'));
+
+        if (!profileId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'No profile specified or active' }));
+            return;
+        }
+        if (isNaN(temp)) {
+            // Use current focuser temperature if not specified, fall back to ambient
+            const state = indi.getState();
+            let currentTemp = state['Pegasus FocusCube']?.temperature;
+            if (currentTemp === null || currentTemp === undefined || currentTemp === 0) {
+                currentTemp = state.weather?.temperature ?? null;
+            }
+            if (currentTemp === null || currentTemp === undefined) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: 'No temperature specified and no sensor available' }));
+                return;
+            }
+            const prediction = predictFocusPosition(profileId, currentTemp);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, temperature: currentTemp, prediction }));
+            return;
+        }
+
+        const prediction = predictFocusPosition(profileId, temp);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, temperature: temp, prediction }));
+        return;
+    }
+
+    // GET /api/focuser/temp-log - Get raw temperature log entries
+    if (url.pathname === '/api/focuser/temp-log' && req.method === 'GET') {
+        const db = loadFocusTempDB();
+        const profileId = url.searchParams.get('profile');
+        const entries = profileId ? db.entries.filter(e => e.profileId === profileId) : db.entries;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            entries: entries.slice(-100),  // Last 100
+            coefficients: db.coefficients,
+            totalEntries: entries.length
+        }));
+        return;
+    }
+
+    // ========================================================================
+    // END FOCUSER PROFILE API ENDPOINTS
+    // ========================================================================
+
+    // ========================================================================
+    // MOUNT CONTROL API ENDPOINTS
+    // ========================================================================
+
+    // GET /api/mount/status - Get mount status
+    if (url.pathname === '/api/mount/status' && req.method === 'GET') {
+        const state = indi.getState();
+        const mount = state['10micron'] || {};
+
+        // Calculate Alt/Az from RA/Dec if not directly available
+        let alt = mount.alt;
+        let az = mount.az;
+        if ((alt === null || alt === undefined) && mount.ra !== undefined && mount.dec !== undefined) {
+            const altaz = calculateAltAz(mount.ra, mount.dec,
+                                         OBSERVATORY.latitude, OBSERVATORY.longitude, new Date());
+            alt = altaz.altitude;
+            az = altaz.azimuth;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            connected: mount.connected || false,
+            ra: mount.ra || 0,
+            dec: mount.dec || 0,
+            alt: alt,
+            az: az,
+            tracking: mount.tracking || false,
+            parked: mount.parked || false
+        }));
+        return;
+    }
+
+    // POST /api/mount/park - Park the mount
+    if (url.pathname === '/api/mount/park' && req.method === 'POST') {
+        try {
+            log('Parking mount...');
+            await indi.mountPark();
+            log('Mount parked');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Mount parked' }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // POST /api/mount/unpark - Unpark the mount
+    if (url.pathname === '/api/mount/unpark' && req.method === 'POST') {
+        try {
+            log('Unparking mount...');
+            await indi.mountUnpark();
+            log('Mount unparked and tracking');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Mount unparked' }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // POST /api/mount/slew - Slew to target (with safety check)
+    if (url.pathname === '/api/mount/slew' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(body);
+                let ra, dec, targetName;
+
+                // Accept either target name or coordinates
+                if (data.target) {
+                    // Look up target in database
+                    const targetId = data.target.toUpperCase().replace(/\s+/g, '_');
+                    const targetData = TARGETS[targetId] || TARGETS[data.target];
+                    if (!targetData) {
+                        // Try partial match
+                        const matchKey = Object.keys(TARGETS).find(k =>
+                            k.toLowerCase().includes(data.target.toLowerCase()) ||
+                            TARGETS[k].name.toLowerCase().includes(data.target.toLowerCase())
+                        );
+                        if (matchKey) {
+                            ra = TARGETS[matchKey].ra_decimal;
+                            dec = TARGETS[matchKey].dec_decimal;
+                            targetName = TARGETS[matchKey].name;
+                        } else {
+                            res.writeHead(404, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, error: `Target "${data.target}" not found in database` }));
+                            return;
+                        }
+                    } else {
+                        ra = targetData.ra_decimal;
+                        dec = targetData.dec_decimal;
+                        targetName = targetData.name;
+                    }
+                } else if (data.ra !== undefined && data.dec !== undefined) {
+                    ra = parseFloat(data.ra);
+                    dec = parseFloat(data.dec);
+                    targetName = `RA ${ra.toFixed(4)}h, Dec ${dec.toFixed(2)}°`;
+                } else {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Provide either "target" name or "ra" and "dec" coordinates' }));
+                    return;
+                }
+
+                // Safety check: calculate altitude
+                const altaz = calculateAltAz(ra, dec,
+                                             OBSERVATORY.latitude, OBSERVATORY.longitude, new Date());
+                const minAltitude = data.minAlt || 15;  // Default minimum 15°
+
+                if (altaz.altitude < minAltitude) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        success: false,
+                        error: `Target too low: altitude ${altaz.altitude.toFixed(1)}° (minimum: ${minAltitude}°)`,
+                        altitude: altaz.altitude,
+                        azimuth: altaz.azimuth,
+                        target: targetName
+                    }));
+                    return;
+                }
+
+                // Check if mount is parked
+                const state = indi.getState();
+                const mount = state['10micron'] || {};
+                if (mount.parked) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: 'Mount is parked. Unpark first.' }));
+                    return;
+                }
+
+                // Safe to slew
+                log(`Slewing to ${targetName} (RA: ${ra.toFixed(4)}h, Dec: ${dec.toFixed(2)}°, Alt: ${altaz.altitude.toFixed(1)}°)`);
+                await indi.mountSlew(ra, dec);
+                log(`Slew complete: ${targetName}`);
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    success: true,
+                    message: `Slewed to ${targetName}`,
+                    target: targetName,
+                    ra: ra,
+                    dec: dec,
+                    altitude: altaz.altitude,
+                    azimuth: altaz.azimuth
+                }));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // GET /api/mount/check-target - Check if target is safe to slew (without slewing)
+    if (url.pathname === '/api/mount/check-target' && req.method === 'GET') {
+        const target = url.searchParams.get('target');
+        const raParam = url.searchParams.get('ra');
+        const decParam = url.searchParams.get('dec');
+        const minAlt = parseFloat(url.searchParams.get('minAlt')) || 15;
+
+        let ra, dec, targetName;
+
+        if (target) {
+            const targetId = target.toUpperCase().replace(/\s+/g, '_');
+            const targetData = TARGETS[targetId] || TARGETS[target];
+            if (!targetData) {
+                const matchKey = Object.keys(TARGETS).find(k =>
+                    k.toLowerCase().includes(target.toLowerCase()) ||
+                    TARGETS[k].name.toLowerCase().includes(target.toLowerCase())
+                );
+                if (matchKey) {
+                    ra = TARGETS[matchKey].ra_decimal;
+                    dec = TARGETS[matchKey].dec_decimal;
+                    targetName = TARGETS[matchKey].name;
+                } else {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: `Target "${target}" not found` }));
+                    return;
+                }
+            } else {
+                ra = targetData.ra_decimal;
+                dec = targetData.dec_decimal;
+                targetName = targetData.name;
+            }
+        } else if (raParam && decParam) {
+            ra = parseFloat(raParam);
+            dec = parseFloat(decParam);
+            targetName = `RA ${ra.toFixed(4)}h, Dec ${dec.toFixed(2)}°`;
+        } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Provide "target" or "ra" and "dec"' }));
+            return;
+        }
+
+        const altaz = calculateAltAz(ra, dec,
+                                     OBSERVATORY.latitude, OBSERVATORY.longitude, new Date());
+        const safe = altaz.altitude >= minAlt;
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            target: targetName,
+            ra: ra,
+            dec: dec,
+            altitude: altaz.altitude,
+            azimuth: altaz.azimuth,
+            safe: safe,
+            reason: safe ? 'Target is above minimum altitude' : `Target too low (${altaz.altitude.toFixed(1)}° < ${minAlt}°)`
+        }));
+        return;
+    }
+
+    // ========================================================================
+    // END MOUNT CONTROL API ENDPOINTS
+    // ========================================================================
+
     res.writeHead(404);
     res.end('Not found');
 });
 
 // Initialize INDI and start server
 async function startServer() {
+    // Load active focuser profile
+    loadActiveProfile();
+    if (activeFocuserProfile) {
+        console.log(`[Focuser] Active profile: ${activeFocuserProfile.name}`);
+    } else {
+        console.log('[Focuser] No active profile set');
+    }
+
     try {
         const initResult = await indi.init();
         indiMode = initResult.mode;
