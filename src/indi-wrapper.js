@@ -58,6 +58,14 @@ class INDIWrapper {
                 this.mode = 'real';
                 this.devices = devices;
                 console.log(`[INDI] Connected to real INDI server with ${deviceCount} devices`);
+
+                // Auto-connect all discovered devices
+                for (const deviceName of Object.keys(devices)) {
+                    console.log(`[INDI] Auto-connecting device: ${deviceName}`);
+                    this.realClient.connectDevice(deviceName);
+                }
+                await new Promise(r => setTimeout(r, 1000));
+
                 return { mode: 'real', devices: Object.keys(devices) };
             } else {
                 throw new Error('No devices found on INDI server');

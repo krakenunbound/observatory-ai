@@ -177,220 +177,530 @@ const HTML = `<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Observatory AI Control</title>
+    <title>Observatory AI - Kraken Observatory</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            background: linear-gradient(135deg, #0a0a15 0%, #1a1a2e 50%, #0a1015 100%);
-            color: #eee;
-            min-height: 100vh;
+
+        :root {
+            --bg-deep: #030308;
+            --bg-space: #0a0a18;
+            --nebula-1: rgba(102, 126, 234, 0.15);
+            --nebula-2: rgba(168, 85, 247, 0.12);
+            --nebula-3: rgba(236, 72, 153, 0.08);
+            --surface: rgba(15, 15, 35, 0.6);
+            --accent: #667eea;
+            --accent2: #a855f7;
+            --accent3: #60a5fa;
+            --gold: #fbbf24;
+            --cyan: #22d3ee;
+            --green: #22c55e;
+            --red: #ef4444;
+            --text: #ffffff;
+            --text-muted: rgba(255,255,255,0.6);
         }
-        .container { max-width: 1600px; margin: 0 auto; padding: 20px; }
+
+        html, body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-deep);
+            color: var(--text);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Deep Space Canvas */
+        .space-canvas {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 0;
+        }
+
+        /* Nebula */
+        .nebula {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 1;
+            pointer-events: none;
+            opacity: 0;
+            animation: nebulaFade 3s ease-out forwards;
+        }
+
+        @keyframes nebulaFade { to { opacity: 1; } }
+
+        .nebula::before {
+            content: '';
+            position: absolute;
+            top: -50%; left: -50%;
+            width: 200%; height: 200%;
+            background:
+                radial-gradient(ellipse at 20% 20%, var(--nebula-1) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 30%, var(--nebula-2) 0%, transparent 45%),
+                radial-gradient(ellipse at 40% 80%, var(--nebula-3) 0%, transparent 50%);
+            animation: nebulaDrift 60s ease-in-out infinite alternate;
+        }
+
+        @keyframes nebulaDrift {
+            0% { transform: translate(0, 0) rotate(0deg); }
+            100% { transform: translate(-5%, -5%) rotate(3deg); }
+        }
+
+        /* Aurora */
+        .aurora {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 40%;
+            z-index: 1;
+            pointer-events: none;
+            background: linear-gradient(180deg, transparent 0%, rgba(102, 126, 234, 0.03) 30%, rgba(168, 85, 247, 0.05) 50%, transparent 100%);
+            animation: auroraPulse 8s ease-in-out infinite;
+        }
+
+        @keyframes auroraPulse {
+            0%, 100% { opacity: 0.5; transform: scaleY(1); }
+            50% { opacity: 1; transform: scaleY(1.2); }
+        }
+
+        /* Shooting Stars */
+        .shooting-stars {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 2;
+            overflow: hidden;
+        }
+
+        .container {
+            position: relative;
+            z-index: 10;
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
         header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 20px;
             padding-bottom: 20px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
+            border-bottom: 1px solid rgba(102, 126, 234, 0.2);
+            opacity: 0;
         }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .back-link {
+            color: var(--accent);
+            text-decoration: none;
+            font-size: 0.9rem;
+            padding: 8px 16px;
+            background: var(--surface);
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s;
+        }
+
+        .back-link:hover {
+            background: rgba(102, 126, 234, 0.2);
+            transform: translateX(-5px);
+        }
+
         h1 {
             font-size: 1.8rem;
-            background: linear-gradient(90deg, #ffd700, #ff6b6b);
+            font-weight: 200;
+            letter-spacing: 0.3rem;
+            background: linear-gradient(135deg, #fff 0%, var(--accent) 50%, var(--accent2) 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
+
         .status-badge {
-            padding: 8px 16px;
-            border-radius: 20px;
+            padding: 10px 20px;
+            border-radius: 25px;
             font-size: 0.85rem;
             font-weight: 600;
+            backdrop-filter: blur(10px);
+            border: 1px solid;
         }
-        .status-safe { background: rgba(0,255,136,0.2); color: #00ff88; }
-        .status-unsafe { background: rgba(255,107,107,0.2); color: #ff6b6b; }
+
+        .status-safe {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--green);
+            border-color: rgba(34, 197, 94, 0.3);
+            box-shadow: 0 0 20px rgba(34, 197, 94, 0.2);
+        }
+
+        .status-unsafe {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--red);
+            border-color: rgba(239, 68, 68, 0.3);
+            box-shadow: 0 0 20px rgba(239, 68, 68, 0.2);
+        }
+
         .grid {
             display: grid;
             grid-template-columns: 300px 1fr 350px;
             gap: 20px;
         }
+
         @media (max-width: 1200px) {
             .grid { grid-template-columns: 1fr; }
         }
+
         .panel {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 12px;
-            padding: 15px;
+            background: var(--surface);
+            border: 1px solid rgba(102, 126, 234, 0.2);
+            border-radius: 16px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
         }
+
+        .panel:hover {
+            border-color: rgba(102, 126, 234, 0.4);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3), 0 0 60px rgba(102, 126, 234, 0.1);
+        }
+
         .panel h2 {
-            color: #ffd700;
-            font-size: 0.9rem;
+            color: var(--gold);
+            font-size: 0.85rem;
+            font-weight: 500;
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 0.15rem;
             margin-bottom: 15px;
             padding-bottom: 10px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
+            border-bottom: 1px solid rgba(251, 191, 36, 0.2);
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
+
+        .panel h2::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            background: var(--gold);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--gold);
+        }
+
         .device {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 10px;
+            padding: 12px;
             margin-bottom: 8px;
-            background: rgba(0,0,0,0.2);
-            border-radius: 8px;
-            font-size: 0.85rem;
-        }
-        .device-name { color: #aaa; }
-        .device-status {
-            padding: 3px 8px;
+            background: rgba(0,0,0,0.3);
             border-radius: 10px;
-            font-size: 0.75rem;
+            font-size: 0.85rem;
+            border: 1px solid rgba(255,255,255,0.05);
+            transition: all 0.3s;
         }
-        .connected { background: rgba(0,255,136,0.2); color: #00ff88; }
-        .disconnected { background: rgba(255,255,255,0.1); color: #666; }
+
+        .device:hover {
+            border-color: rgba(102, 126, 234, 0.3);
+            background: rgba(102, 126, 234, 0.05);
+        }
+
+        .device-name { color: var(--text-muted); }
+
+        .device-status {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .connected {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--green);
+            box-shadow: 0 0 10px rgba(34, 197, 94, 0.3);
+        }
+
+        .disconnected {
+            background: rgba(255,255,255,0.1);
+            color: #666;
+        }
+
         .target-search {
             display: flex;
             gap: 10px;
             margin-bottom: 15px;
         }
+
         .target-search input {
             flex: 1;
-            padding: 12px;
-            background: rgba(0,0,0,0.3);
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 8px;
-            color: #eee;
+            padding: 14px 18px;
+            background: rgba(0,0,0,0.4);
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            border-radius: 12px;
+            color: var(--text);
             font-size: 1rem;
+            transition: all 0.3s;
         }
+
+        .target-search input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 20px rgba(102, 126, 234, 0.2);
+        }
+
         .target-search button {
-            padding: 12px 20px;
-            background: linear-gradient(90deg, #ffd700, #ff8c00);
+            padding: 14px 24px;
+            background: linear-gradient(135deg, var(--gold), #ff8c00);
             border: none;
-            border-radius: 8px;
+            border-radius: 12px;
             color: #000;
             font-weight: 600;
             cursor: pointer;
+            transition: all 0.3s;
         }
+
+        .target-search button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(251, 191, 36, 0.3);
+        }
+
         .target-info {
-            background: rgba(0,0,0,0.2);
-            border-radius: 8px;
-            padding: 15px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            padding: 18px;
             margin-bottom: 15px;
+            border: 1px solid rgba(34, 211, 238, 0.2);
         }
-        .target-name { font-size: 1.3rem; color: #00d4ff; margin-bottom: 5px; }
-        .target-type { color: #888; font-size: 0.85rem; }
-        .target-coords { margin-top: 10px; font-family: monospace; color: #aaa; }
-        .plan-steps {
-            list-style: none;
+
+        .target-name {
+            font-size: 1.4rem;
+            color: var(--cyan);
+            margin-bottom: 5px;
+            text-shadow: 0 0 20px rgba(34, 211, 238, 0.3);
         }
+
+        .target-type { color: var(--text-muted); font-size: 0.85rem; }
+        .target-coords { margin-top: 10px; font-family: monospace; color: var(--text-muted); }
+
+        .plan-steps { list-style: none; }
+
         .plan-step {
             display: flex;
             align-items: center;
-            gap: 10px;
-            padding: 10px;
-            margin-bottom: 5px;
-            background: rgba(0,0,0,0.2);
-            border-radius: 6px;
+            gap: 12px;
+            padding: 12px;
+            margin-bottom: 6px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
             font-size: 0.85rem;
+            border: 1px solid rgba(255,255,255,0.05);
+            transition: all 0.3s;
         }
+
+        .plan-step:hover {
+            border-color: rgba(102, 126, 234, 0.3);
+        }
+
         .step-icon {
-            width: 24px;
-            height: 24px;
+            width: 28px;
+            height: 28px;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 0.7rem;
+            font-size: 0.75rem;
+            font-weight: 600;
         }
+
         .step-pending { background: rgba(255,255,255,0.1); color: #666; }
-        .step-running { background: rgba(255,193,7,0.3); color: #ffc107; animation: pulse 1s infinite; }
-        .step-completed { background: rgba(0,255,136,0.2); color: #00ff88; }
-        .step-failed { background: rgba(255,107,107,0.2); color: #ff6b6b; }
-        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .step-running {
+            background: rgba(251, 191, 36, 0.3);
+            color: var(--gold);
+            animation: stepPulse 1s infinite;
+            box-shadow: 0 0 15px rgba(251, 191, 36, 0.4);
+        }
+        .step-completed {
+            background: rgba(34, 197, 94, 0.3);
+            color: var(--green);
+            box-shadow: 0 0 10px rgba(34, 197, 94, 0.3);
+        }
+        .step-failed {
+            background: rgba(239, 68, 68, 0.3);
+            color: var(--red);
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
+        }
+
+        @keyframes stepPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
         .weather-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 10px;
         }
+
         .weather-item {
-            background: rgba(0,0,0,0.2);
-            padding: 10px;
-            border-radius: 6px;
+            background: rgba(0,0,0,0.3);
+            padding: 12px;
+            border-radius: 10px;
             text-align: center;
+            border: 1px solid rgba(255,255,255,0.05);
+            transition: all 0.3s;
         }
-        .weather-value { font-size: 1.2rem; color: #00d4ff; }
-        .weather-label { font-size: 0.7rem; color: #666; margin-top: 3px; }
+
+        .weather-item:hover {
+            border-color: rgba(34, 211, 238, 0.3);
+            background: rgba(34, 211, 238, 0.05);
+        }
+
+        .weather-value {
+            font-size: 1.3rem;
+            color: var(--cyan);
+            text-shadow: 0 0 15px rgba(34, 211, 238, 0.3);
+        }
+
+        .weather-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.05rem;
+        }
+
         .log-container {
             height: 200px;
             overflow-y: auto;
-            background: rgba(0,0,0,0.3);
-            border-radius: 8px;
-            padding: 10px;
-            font-family: monospace;
+            background: rgba(0,0,0,0.4);
+            border-radius: 10px;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
             font-size: 0.75rem;
+            border: 1px solid rgba(255,255,255,0.05);
         }
-        .log-entry { margin-bottom: 5px; color: #888; }
-        .log-entry .time { color: #666; }
+
+        .log-entry {
+            margin-bottom: 6px;
+            color: var(--text-muted);
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+        }
+
+        .log-entry .time { color: var(--accent); }
+
         .btn-row {
             display: flex;
-            gap: 10px;
+            gap: 12px;
             margin-top: 15px;
         }
+
         .btn {
             flex: 1;
-            padding: 10px;
+            padding: 12px;
             border: none;
-            border-radius: 6px;
+            border-radius: 10px;
             font-weight: 600;
             cursor: pointer;
-            transition: transform 0.2s;
+            transition: all 0.3s;
         }
-        .btn:hover { transform: translateY(-2px); }
-        .btn-primary { background: linear-gradient(90deg, #00d4ff, #845ef7); color: white; }
-        .btn-danger { background: linear-gradient(90deg, #ff6b6b, #ff8c00); color: white; }
-        .btn-success { background: linear-gradient(90deg, #00ff88, #00d4ff); color: #000; }
+
+        .btn:hover { transform: translateY(-3px); }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            color: white;
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, var(--red), #ff8c00);
+            color: white;
+            box-shadow: 0 5px 20px rgba(239, 68, 68, 0.3);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, var(--green), var(--cyan));
+            color: #000;
+            box-shadow: 0 5px 20px rgba(34, 197, 94, 0.3);
+        }
+
         .simulation-notice {
-            background: rgba(255,193,7,0.1);
-            border: 1px solid rgba(255,193,7,0.3);
-            border-radius: 8px;
-            padding: 10px;
-            margin-bottom: 15px;
-            font-size: 0.8rem;
-            color: #ffc107;
+            background: rgba(251, 191, 36, 0.1);
+            border: 1px solid rgba(251, 191, 36, 0.3);
+            border-radius: 12px;
+            padding: 12px 18px;
+            margin-bottom: 20px;
+            font-size: 0.85rem;
+            color: var(--gold);
+            display: none;
+            align-items: center;
+            gap: 10px;
         }
+
+        .simulation-notice::before {
+            content: '⚠';
+            font-size: 1.1rem;
+        }
+
         .target-list {
-            max-height: 300px;
+            max-height: 400px;
             overflow-y: auto;
         }
+
         .target-item {
-            padding: 8px 10px;
-            margin-bottom: 5px;
-            background: rgba(0,0,0,0.2);
-            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 6px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.3s;
+            border: 1px solid rgba(255,255,255,0.05);
         }
-        .target-item:hover { background: rgba(0,212,255,0.1); }
-        .target-item-name { color: #00d4ff; font-weight: 500; }
-        .target-item-info { color: #666; font-size: 0.75rem; }
+
+        .target-item:hover {
+            background: rgba(34, 211, 238, 0.1);
+            border-color: rgba(34, 211, 238, 0.3);
+            transform: translateX(5px);
+        }
+
+        .target-item-name {
+            color: var(--cyan);
+            font-weight: 500;
+        }
+
+        .target-item-info {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            margin-top: 3px;
+        }
     </style>
 </head>
 <body>
+    <canvas class="space-canvas" id="spaceCanvas"></canvas>
+    <div class="nebula"></div>
+    <div class="aurora"></div>
+    <div class="shooting-stars" id="shootingStars"></div>
+
     <div class="container">
-        <header>
-            <h1>Observatory AI Control</h1>
+        <header id="header">
+            <div class="header-left">
+                <a href="#" class="back-link" id="portalLink">← Portal</a>
+                <h1>OBSERVATORY AI</h1>
+            </div>
             <div class="status-badge" id="safetyStatus">Checking...</div>
         </header>
 
-        <div class="simulation-notice">
+        <div class="simulation-notice" id="simNotice">
             SIMULATION MODE - Not connected to real hardware. Connect to INDI server when at observatory.
         </div>
 
         <div class="grid">
-            <!-- Left Panel - Devices -->
-            <div class="panel">
+            <div class="panel" id="panel1">
                 <h2>Equipment Status</h2>
                 <div id="deviceList"></div>
 
@@ -398,8 +708,7 @@ const HTML = `<!DOCTYPE html>
                 <div class="weather-grid" id="weatherGrid"></div>
             </div>
 
-            <!-- Center Panel - Planning -->
-            <div class="panel">
+            <div class="panel" id="panel2">
                 <h2>Session Planning</h2>
 
                 <div class="target-search">
@@ -423,14 +732,249 @@ const HTML = `<!DOCTYPE html>
                 <div class="log-container" id="logContainer"></div>
             </div>
 
-            <!-- Right Panel - Target Database -->
-            <div class="panel">
+            <div class="panel" id="panel3">
                 <h2>Target Database</h2>
                 <div class="target-list" id="targetList"></div>
             </div>
         </div>
+
+        <!-- Technical Dashboard Row -->
+        <div class="grid" style="margin-top: 20px; grid-template-columns: 1fr 1fr 1fr;">
+            <!-- Focuser Panel -->
+            <div class="panel" id="panel4">
+                <h2>Focuser</h2>
+                <div class="focuser-status">
+                    <div class="device">
+                        <span class="device-name">Position</span>
+                        <span id="focuserPos" style="color: var(--cyan); font-family: monospace;">--</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">Temperature</span>
+                        <span id="focuserTemp" style="color: var(--cyan);">--</span>
+                    </div>
+                </div>
+                <h2 style="margin-top: 15px;">Last V-Curve</h2>
+                <canvas id="vcurveCanvas" width="280" height="160" style="background: rgba(0,0,0,0.3); border-radius: 8px; width: 100%;"></canvas>
+                <div id="vcurveInfo" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">No autofocus data</div>
+            </div>
+
+            <!-- USB Hub Panel -->
+            <div class="panel" id="panel5">
+                <h2>USB Hub Control</h2>
+                <div id="usbPorts" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;"></div>
+            </div>
+
+            <!-- Plate Solve Panel -->
+            <div class="panel" id="panel6">
+                <h2>Last Plate Solve</h2>
+                <div id="plateSolveResult">
+                    <div class="device">
+                        <span class="device-name">Status</span>
+                        <span id="solveStatus" style="color: var(--text-muted);">No data</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">RA</span>
+                        <span id="solveRA" style="color: var(--cyan); font-family: monospace;">--</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">Dec</span>
+                        <span id="solveDec" style="color: var(--cyan); font-family: monospace;">--</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">Field</span>
+                        <span id="solveField" style="color: var(--text-muted);">--</span>
+                    </div>
+                    <div class="device">
+                        <span class="device-name">Rotation</span>
+                        <span id="solveRotation" style="color: var(--text-muted);">--</span>
+                    </div>
+                </div>
+                <h2 style="margin-top: 15px;">Pointing Error</h2>
+                <div id="pointingError" style="text-align: center; padding: 10px;">
+                    <span style="font-size: 1.8rem; color: var(--green);" id="errorValue">--</span>
+                    <div style="font-size: 0.75rem; color: var(--text-muted);">arcseconds</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Image Transfer Section -->
+        <div class="panel" style="margin-top: 20px;">
+            <h2>Image Transfer</h2>
+            <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
+                <button class="btn btn-success" onclick="syncImages()">Sync to Desktop</button>
+                <span id="syncStatus" style="color: var(--text-muted); font-size: 0.85rem;">Ready</span>
+                <div style="margin-left: auto; font-size: 0.8rem; color: var(--text-muted);">
+                    Images: <span id="imageCount">--</span> |
+                    Latest: <span id="latestImage">--</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Roof Control Panel -->
+        <div class="panel" style="margin-top: 20px;">
+            <h2>Roof Control</h2>
+            <div style="display: flex; gap: 20px; align-items: center; flex-wrap: wrap;">
+                <div style="text-align: center; min-width: 120px;">
+                    <div id="roofStatus" style="font-size: 1.5rem; font-weight: bold; color: var(--text-muted);">--</div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted);">Status</div>
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <button class="btn btn-success" onclick="roofOpen()" style="min-width: 80px;">Open</button>
+                    <button class="btn btn-danger" onclick="roofClose()" style="min-width: 80px;">Close</button>
+                    <button class="btn btn-primary" onclick="roofStop()" style="min-width: 80px;">Stop</button>
+                </div>
+                <div style="margin-left: auto; font-size: 0.8rem; color: var(--text-muted);">
+                    Last update: <span id="roofLastUpdate">--</span>
+                </div>
+            </div>
+        </div>
     </div>
 
+    <script type="module">
+        import { animate, stagger, createTimeline } from 'https://cdn.jsdelivr.net/npm/animejs/+esm';
+
+        // Set portal link
+        document.getElementById('portalLink').href = 'http://' + window.location.hostname + ':8081';
+
+        // Deep Space Canvas
+        const canvas = document.getElementById('spaceCanvas');
+        const ctx = canvas.getContext('2d');
+        let stars = [];
+        let width, height;
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initStars();
+        }
+
+        function initStars() {
+            stars = [];
+            const layers = [
+                { count: 150, size: 0.5, speed: 0.02, opacity: 0.3 },
+                { count: 100, size: 1, speed: 0.05, opacity: 0.5 },
+                { count: 75, size: 1.5, speed: 0.1, opacity: 0.7 },
+                { count: 40, size: 2, speed: 0.15, opacity: 1 }
+            ];
+
+            layers.forEach(layer => {
+                for (let i = 0; i < layer.count; i++) {
+                    stars.push({
+                        x: Math.random() * width,
+                        y: Math.random() * height,
+                        size: layer.size + Math.random() * 0.5,
+                        speed: layer.speed,
+                        opacity: layer.opacity * (0.5 + Math.random() * 0.5),
+                        twinkle: Math.random() * Math.PI * 2,
+                        twinkleSpeed: 0.02 + Math.random() * 0.03
+                    });
+                }
+            });
+        }
+
+        function drawStars() {
+            ctx.fillStyle = '#030308';
+            ctx.fillRect(0, 0, width, height);
+
+            stars.forEach(star => {
+                star.twinkle += star.twinkleSpeed;
+                const flicker = 0.7 + Math.sin(star.twinkle) * 0.3;
+                const alpha = star.opacity * flicker;
+
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 255, 255, ' + alpha + ')';
+                ctx.fill();
+
+                if (star.size > 1) {
+                    const gradient = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, star.size * 4);
+                    gradient.addColorStop(0, 'rgba(200, 220, 255, ' + (alpha * 0.3) + ')');
+                    gradient.addColorStop(1, 'transparent');
+                    ctx.beginPath();
+                    ctx.arc(star.x, star.y, star.size * 4, 0, Math.PI * 2);
+                    ctx.fillStyle = gradient;
+                    ctx.fill();
+                }
+
+                star.y += star.speed;
+                if (star.y > height + 10) {
+                    star.y = -10;
+                    star.x = Math.random() * width;
+                }
+            });
+
+            requestAnimationFrame(drawStars);
+        }
+
+        resize();
+        window.addEventListener('resize', resize);
+        drawStars();
+
+        // Shooting Stars
+        function createShootingStar() {
+            const star = document.createElement('div');
+            const startX = Math.random() * window.innerWidth;
+            const startY = Math.random() * window.innerHeight * 0.5;
+
+            star.style.cssText = 'position:absolute;left:' + startX + 'px;top:' + startY + 'px;width:80px;height:2px;background:linear-gradient(90deg,transparent,white,white);border-radius:2px;transform:rotate(45deg);opacity:0;box-shadow:0 0 10px white,0 0 20px white;';
+
+            document.getElementById('shootingStars').appendChild(star);
+
+            animate(star, {
+                translateX: [0, 250],
+                translateY: [0, 250],
+                opacity: [0, 1, 1, 0],
+                duration: 900,
+                easing: 'easeOutQuad',
+                complete: () => star.remove()
+            });
+        }
+
+        setInterval(() => {
+            if (Math.random() > 0.7) createShootingStar();
+        }, 2500);
+
+        // Entry animations
+        const tl = createTimeline({ autoplay: true });
+
+        tl.add('#header', {
+            opacity: [0, 1],
+            translateY: [-20, 0],
+            duration: 600,
+            easing: 'easeOutQuart'
+        })
+        // simNotice visibility controlled by init() based on INDI mode
+        .add('.panel', {
+            opacity: [0, 1],
+            translateY: [20, 0],
+            duration: 600,
+            delay: stagger(150),
+            easing: 'easeOutQuart'
+        }, '-=300');
+
+        // Click particles
+        document.addEventListener('click', e => {
+            for (let i = 0; i < 8; i++) {
+                const particle = document.createElement('div');
+                const angle = (i / 8) * Math.PI * 2;
+                const velocity = 40 + Math.random() * 40;
+                const colors = ['#667eea', '#a855f7', '#60a5fa', '#fbbf24'];
+
+                particle.style.cssText = 'position:fixed;left:' + e.clientX + 'px;top:' + e.clientY + 'px;width:4px;height:4px;background:' + colors[Math.floor(Math.random() * 4)] + ';border-radius:50%;pointer-events:none;z-index:9999;box-shadow:0 0 6px currentColor;';
+                document.body.appendChild(particle);
+
+                animate(particle, {
+                    translateX: Math.cos(angle) * velocity,
+                    translateY: Math.sin(angle) * velocity,
+                    scale: [1, 0],
+                    opacity: [1, 0],
+                    duration: 700,
+                    easing: 'easeOutQuad',
+                    complete: () => particle.remove()
+                });
+            }
+        });
+    </script>
     <script>
         const WS_URL = 'ws://' + window.location.hostname + ':8093';
         let ws;
@@ -587,6 +1131,18 @@ const HTML = `<!DOCTYPE html>
 
         // Initial load
         async function init() {
+            // Check INDI mode - show simulation notice only if in simulation mode
+            try {
+                const modeResp = await fetch('/api/mode');
+                const modeData = await modeResp.json();
+                if (modeData.mode !== 'real') {
+                    document.getElementById('simNotice').style.display = 'flex';
+                }
+                // If mode is 'real', notice stays hidden (CSS default)
+            } catch (e) {
+                console.error('Mode check error:', e);
+            }
+
             // Get targets
             const targetsResp = await fetch('/api/targets');
             const targets = await targetsResp.json();
@@ -614,6 +1170,299 @@ const HTML = `<!DOCTYPE html>
         }
 
         init();
+
+        // ========================================
+        // Technical Dashboard - fetches from Portal (8081)
+        // ========================================
+        const PORTAL_URL = 'http://' + window.location.hostname + ':8081';
+
+        // Fetch INDI data from portal
+        async function fetchPortalINDI() {
+            try {
+                const resp = await fetch(PORTAL_URL + '/api/indi');
+                const data = await resp.json();
+
+                // Update focuser
+                if (data.devices && data.devices.focuser) {
+                    document.getElementById('focuserPos').textContent = data.devices.focuser.position || '--';
+                    document.getElementById('focuserTemp').textContent =
+                        data.devices.focuser.temperature ? data.devices.focuser.temperature.toFixed(1) + 'C' : '--';
+                }
+
+                // Update USB ports
+                if (data.devices && data.devices.usb_hub) {
+                    updateUSBPorts(data.devices.usb_hub);
+                }
+            } catch (e) {
+                console.error('Portal INDI fetch error:', e);
+            }
+        }
+
+        // USB port controls
+        function updateUSBPorts(hub) {
+            const container = document.getElementById('usbPorts');
+            if (!hub.ports) return;
+
+            let html = '';
+            for (const [port, state] of Object.entries(hub.ports)) {
+                const isOn = state === 'On' || state === true;
+                const color = isOn ? 'var(--green)' : '#666';
+                html += '<div class="device" style="cursor: pointer;" onclick="toggleUSB(\\'' + port + '\\')">' +
+                    '<span class="device-name">' + port + '</span>' +
+                    '<span style="color:' + color + ';font-size:0.85rem;">' + (isOn ? 'ON' : 'OFF') + '</span>' +
+                    '</div>';
+            }
+            container.innerHTML = html;
+        }
+
+        async function toggleUSB(port) {
+            try {
+                await fetch(PORTAL_URL + '/api/usb/' + port.replace('usb', ''), { method: 'POST' });
+                setTimeout(fetchPortalINDI, 500);
+            } catch (e) {
+                console.error('USB toggle error:', e);
+            }
+        }
+        window.toggleUSB = toggleUSB;
+
+        // V-curve rendering
+        function drawVCurve(data) {
+            const canvas = document.getElementById('vcurveCanvas');
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(0, 0, w, h);
+
+            if (!data || !data.points || data.points.length < 3) {
+                ctx.fillStyle = '#666';
+                ctx.font = '12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('No autofocus data', w/2, h/2);
+                return;
+            }
+
+            const points = data.points;
+            const minPos = Math.min.apply(null, points.map(function(p) { return p.position; }));
+            const maxPos = Math.max.apply(null, points.map(function(p) { return p.position; }));
+            const minHFR = Math.min.apply(null, points.map(function(p) { return p.hfr; }));
+            const maxHFR = Math.max.apply(null, points.map(function(p) { return p.hfr; }));
+
+            const padX = 30, padY = 20;
+            const scaleX = (w - padX * 2) / (maxPos - minPos || 1);
+            const scaleY = (h - padY * 2) / (maxHFR - minHFR || 1);
+
+            // Draw axes
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padX, padY);
+            ctx.lineTo(padX, h - padY);
+            ctx.lineTo(w - padX, h - padY);
+            ctx.stroke();
+
+            // Draw V-curve fit
+            if (data.bestPosition && data.minHFR && data.slope) {
+                ctx.strokeStyle = 'rgba(102, 126, 234, 0.5)';
+                ctx.beginPath();
+                for (var i = 0; i <= 50; i++) {
+                    var pos = minPos + (maxPos - minPos) * (i / 50);
+                    var hfr = data.minHFR + data.slope * Math.sqrt(Math.pow(pos - data.bestPosition, 2));
+                    var x = padX + (pos - minPos) * scaleX;
+                    var y = h - padY - (hfr - minHFR) * scaleY;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // Draw data points
+            ctx.fillStyle = '#22d3ee';
+            points.forEach(function(p) {
+                var x = padX + (p.position - minPos) * scaleX;
+                var y = h - padY - (p.hfr - minHFR) * scaleY;
+                ctx.beginPath();
+                ctx.arc(x, y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // Mark best position
+            if (data.bestPosition) {
+                var bx = padX + (data.bestPosition - minPos) * scaleX;
+                ctx.strokeStyle = '#22c55e';
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(bx, padY);
+                ctx.lineTo(bx, h - padY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }
+
+        // Fetch autofocus data
+        async function fetchAutofocusData() {
+            try {
+                const resp = await fetch(PORTAL_URL + '/api/autofocus/latest');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.success && data.vcurve) {
+                        drawVCurve(data.vcurve);
+                        document.getElementById('vcurveInfo').textContent =
+                            'Best: ' + data.vcurve.bestPosition + ' | HFR: ' + data.vcurve.minHFR.toFixed(2) + '"';
+                    }
+                }
+            } catch (e) {
+                drawVCurve(null);
+            }
+        }
+
+        // Fetch plate solve data
+        async function fetchPlateSolveData() {
+            try {
+                const resp = await fetch(PORTAL_URL + '/api/platesolve/latest');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.success) {
+                        document.getElementById('solveStatus').textContent = 'Solved';
+                        document.getElementById('solveStatus').style.color = 'var(--green)';
+                        document.getElementById('solveRA').textContent = data.ra || '--';
+                        document.getElementById('solveDec').textContent = data.dec || '--';
+                        document.getElementById('solveField').textContent = data.fieldWidth ? data.fieldWidth.toFixed(2) + 'x' + data.fieldHeight.toFixed(2) : '--';
+                        document.getElementById('solveRotation').textContent = data.rotation ? data.rotation.toFixed(1) + ' deg' : '--';
+                        document.getElementById('errorValue').textContent = data.error ? data.error.toFixed(1) : '--';
+                    }
+                }
+            } catch (e) {
+                // No plate solve data
+            }
+        }
+
+        // Fetch image stats
+        async function fetchImageStats() {
+            try {
+                const resp = await fetch(PORTAL_URL + '/captures/metadata.json');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    document.getElementById('imageCount').textContent = data.images ? data.images.length : 0;
+                    document.getElementById('latestImage').textContent = data.most_recent ? data.most_recent.filename : '--';
+                }
+            } catch (e) {
+                // No image data
+            }
+        }
+
+        // Image sync
+        async function syncImages() {
+            document.getElementById('syncStatus').textContent = 'Syncing...';
+            document.getElementById('syncStatus').style.color = 'var(--gold)';
+            try {
+                const resp = await fetch(PORTAL_URL + '/api/sync-images', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    document.getElementById('syncStatus').textContent = 'Synced ' + (data.count || 0) + ' images';
+                    document.getElementById('syncStatus').style.color = 'var(--green)';
+                } else {
+                    document.getElementById('syncStatus').textContent = 'Sync failed: ' + (data.error || 'Unknown');
+                    document.getElementById('syncStatus').style.color = 'var(--red)';
+                }
+            } catch (e) {
+                document.getElementById('syncStatus').textContent = 'Sync error';
+                document.getElementById('syncStatus').style.color = 'var(--red)';
+            }
+        }
+        window.syncImages = syncImages;
+
+        // ========================================
+        // Roof Control Functions
+        // ========================================
+        async function fetchRoofStatus() {
+            try {
+                const resp = await fetch(PORTAL_URL + '/api/roof/status');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const statusEl = document.getElementById('roofStatus');
+                    statusEl.textContent = data.status || 'UNKNOWN';
+
+                    // Color based on status
+                    if (data.status === 'OPEN') {
+                        statusEl.style.color = 'var(--green)';
+                    } else if (data.status === 'CLOSED') {
+                        statusEl.style.color = 'var(--cyan)';
+                    } else if (data.status === 'OPENING' || data.status === 'CLOSING' || data.status === 'MOVING') {
+                        statusEl.style.color = 'var(--gold)';
+                    } else {
+                        statusEl.style.color = 'var(--text-muted)';
+                    }
+
+                    if (data.lastUpdate) {
+                        document.getElementById('roofLastUpdate').textContent = new Date(data.lastUpdate).toLocaleTimeString();
+                    }
+                }
+            } catch (e) {
+                document.getElementById('roofStatus').textContent = 'ERROR';
+                document.getElementById('roofStatus').style.color = 'var(--red)';
+            }
+        }
+
+        async function roofOpen() {
+            try {
+                document.getElementById('roofStatus').textContent = 'OPENING...';
+                document.getElementById('roofStatus').style.color = 'var(--gold)';
+                const resp = await fetch(PORTAL_URL + '/api/roof/open', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    setTimeout(fetchRoofStatus, 1000);
+                } else {
+                    document.getElementById('roofStatus').textContent = 'ERROR';
+                    document.getElementById('roofStatus').style.color = 'var(--red)';
+                }
+            } catch (e) {
+                document.getElementById('roofStatus').textContent = 'ERROR';
+                document.getElementById('roofStatus').style.color = 'var(--red)';
+            }
+        }
+        window.roofOpen = roofOpen;
+
+        async function roofClose() {
+            try {
+                document.getElementById('roofStatus').textContent = 'CLOSING...';
+                document.getElementById('roofStatus').style.color = 'var(--gold)';
+                const resp = await fetch(PORTAL_URL + '/api/roof/close', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    setTimeout(fetchRoofStatus, 1000);
+                } else {
+                    document.getElementById('roofStatus').textContent = 'ERROR';
+                    document.getElementById('roofStatus').style.color = 'var(--red)';
+                }
+            } catch (e) {
+                document.getElementById('roofStatus').textContent = 'ERROR';
+                document.getElementById('roofStatus').style.color = 'var(--red)';
+            }
+        }
+        window.roofClose = roofClose;
+
+        async function roofStop() {
+            try {
+                const resp = await fetch(PORTAL_URL + '/api/roof/stop', { method: 'POST' });
+                const data = await resp.json();
+                setTimeout(fetchRoofStatus, 500);
+            } catch (e) {
+                console.error('Roof stop error:', e);
+            }
+        }
+        window.roofStop = roofStop;
+
+        // Start technical dashboard updates
+        fetchPortalINDI();
+        fetchAutofocusData();
+        fetchPlateSolveData();
+        fetchImageStats();
+        fetchRoofStatus();
+        drawVCurve(null);
+        setInterval(fetchPortalINDI, 5000);
+        setInterval(fetchImageStats, 30000);
+        setInterval(fetchRoofStatus, 5000);
     </script>
 </body>
 </html>`;
