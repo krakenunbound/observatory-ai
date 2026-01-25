@@ -974,8 +974,8 @@ const HTML = `<!DOCTYPE html>
                         <span id="focuserTemp" style="color: var(--cyan);">--</span>
                     </div>
                 </div>
-                <h2 style="margin-top: 15px;">Last V-Curve</h2>
-                <canvas id="vcurveCanvas" width="280" height="160" style="background: rgba(0,0,0,0.3); border-radius: 8px; width: 100%;"></canvas>
+                <h2 style="margin-top: 15px;">Autofocus V-Curve</h2>
+                <canvas id="vcurveCanvas" width="300" height="180" style="background: rgba(0,0,0,0.3); border-radius: 8px; width: 100%;"></canvas>
                 <div id="vcurveInfo" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">No autofocus data</div>
             </div>
 
@@ -1913,38 +1913,69 @@ const HTML = `<!DOCTYPE html>
             const minHFR = Math.min.apply(null, points.map(function(p) { return p.hfr; }));
             const maxHFR = Math.max.apply(null, points.map(function(p) { return p.hfr; }));
 
-            const padX = 30, padY = 20;
-            const scaleX = (w - padX * 2) / (maxPos - minPos || 1);
-            const scaleY = (h - padY * 2) / (maxHFR - minHFR || 1);
+            const padLeft = 40, padRight = 15, padTop = 15, padBottom = 25;
+            const scaleX = (w - padLeft - padRight) / (maxPos - minPos || 1);
+            const scaleY = (h - padTop - padBottom) / (maxHFR - minHFR || 1);
 
             // Draw axes
-            ctx.strokeStyle = '#444';
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
             ctx.beginPath();
-            ctx.moveTo(padX, padY);
-            ctx.lineTo(padX, h - padY);
-            ctx.lineTo(w - padX, h - padY);
+            ctx.moveTo(padLeft, padTop);
+            ctx.lineTo(padLeft, h - padBottom);
+            ctx.lineTo(w - padRight, h - padBottom);
             ctx.stroke();
+
+            // Y-axis label (HFD)
+            ctx.save();
+            ctx.fillStyle = '#aaa';
+            ctx.font = '10px sans-serif';
+            ctx.translate(10, h / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.textAlign = 'center';
+            ctx.fillText('HFD (px)', 0, 0);
+            ctx.restore();
+
+            // X-axis label (Focus Position)
+            ctx.fillStyle = '#aaa';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Focus Position (steps)', w / 2, h - 3);
+
+            // Y-axis tick labels
+            ctx.fillStyle = '#888';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText(maxHFR.toFixed(1), padLeft - 3, padTop + 4);
+            ctx.fillText(minHFR.toFixed(1), padLeft - 3, h - padBottom + 3);
+
+            // X-axis tick labels
+            ctx.textAlign = 'center';
+            ctx.fillText(minPos.toString(), padLeft, h - padBottom + 12);
+            ctx.fillText(maxPos.toString(), w - padRight, h - padBottom + 12);
 
             // Draw V-curve fit
             if (data.bestPosition && data.minHFR && data.slope) {
-                ctx.strokeStyle = 'rgba(102, 126, 234, 0.5)';
+                ctx.strokeStyle = 'rgba(102, 126, 234, 0.6)';
+                ctx.lineWidth = 2;
                 ctx.beginPath();
                 for (var i = 0; i <= 50; i++) {
                     var pos = minPos + (maxPos - minPos) * (i / 50);
                     var hfr = data.minHFR + data.slope * Math.sqrt(Math.pow(pos - data.bestPosition, 2));
-                    var x = padX + (pos - minPos) * scaleX;
-                    var y = h - padY - (hfr - minHFR) * scaleY;
+                    var x = padLeft + (pos - minPos) * scaleX;
+                    var y = h - padBottom - (hfr - minHFR) * scaleY;
                     if (i === 0) ctx.moveTo(x, y);
                     else ctx.lineTo(x, y);
                 }
                 ctx.stroke();
+                ctx.lineWidth = 1;
             }
 
             // Draw data points
             ctx.fillStyle = '#22d3ee';
             points.forEach(function(p) {
-                var x = padX + (p.position - minPos) * scaleX;
-                var y = h - padY - (p.hfr - minHFR) * scaleY;
+                var x = padLeft + (p.position - minPos) * scaleX;
+                var y = h - padBottom - (p.hfr - minHFR) * scaleY;
                 ctx.beginPath();
                 ctx.arc(x, y, 4, 0, Math.PI * 2);
                 ctx.fill();
@@ -1952,12 +1983,12 @@ const HTML = `<!DOCTYPE html>
 
             // Mark best position
             if (data.bestPosition) {
-                var bx = padX + (data.bestPosition - minPos) * scaleX;
+                var bx = padLeft + (data.bestPosition - minPos) * scaleX;
                 ctx.strokeStyle = '#22c55e';
                 ctx.setLineDash([4, 4]);
                 ctx.beginPath();
-                ctx.moveTo(bx, padY);
-                ctx.lineTo(bx, h - padY);
+                ctx.moveTo(bx, padTop);
+                ctx.lineTo(bx, h - padBottom);
                 ctx.stroke();
                 ctx.setLineDash([]);
             }

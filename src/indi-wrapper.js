@@ -139,18 +139,51 @@ class INDIWrapper {
                 state[ourName] = deviceState;
             }
 
-            // Add simulated weather for now (real weather device would need integration)
-            state.weather = {
-                name: 'Weather (simulated)',
-                connected: true,
-                temperature: 15,
-                humidity: 45,
-                dewPoint: 5,
-                cloudCover: 10,
-                skyQuality: 21.5,
-                windSpeed: 5,
-                safe: true
-            };
+            // Parse weather from Uranus Meteo Sensor if available
+            const weatherDevice = devices['Uranus Meteo Sensor'];
+            if (weatherDevice) {
+                const wProps = weatherDevice.properties;
+                const wConnected = wProps.CONNECTION?.values?.CONNECT?.value || false;
+
+                // Uranus Meteo Sensor uses SENSORS group for raw values
+                const sensors = wProps.SENSORS?.values || {};
+                const skyQuality = wProps.SKYQUALITY?.values || {};
+                const weatherParams = wProps.WEATHER_PARAMETERS?.values || {};
+                const weatherStatus = wProps.WEATHER_STATUS?.values || {};
+
+                // Check if all weather statuses are OK
+                const tempOk = weatherStatus.WEATHER_TEMPERATURE?.value === 'Ok';
+                const humidOk = weatherStatus.WEATHER_HUMIDITY?.value === 'Ok';
+                const cloudOk = weatherStatus.WEATHER_CLOUD?.value === 'Ok';
+                const isSafe = tempOk && humidOk && cloudOk;
+
+                state.weather = {
+                    name: 'Uranus Meteo Sensor',
+                    connected: wConnected,
+                    temperature: sensors.AmbientTemperature?.value ?? 15,
+                    humidity: sensors.RelativeHumidity?.value ?? 50,
+                    dewPoint: sensors.DewPoint?.value ?? 5,
+                    pressure: sensors.AbsolutePressure?.value ?? 1013,
+                    skyTemperature: sensors.SkyTemperature?.value ?? null,
+                    cloudCover: weatherParams.WEATHER_CLOUD?.value ?? 0,
+                    skyQuality: skyQuality.MPAS?.value ?? null,
+                    windSpeed: 0,  // Uranus Meteo Sensor doesn't have wind sensor
+                    safe: isSafe
+                };
+            } else {
+                // Fallback to simulated if no weather device found
+                state.weather = {
+                    name: 'Weather (simulated)',
+                    connected: true,
+                    temperature: 15,
+                    humidity: 45,
+                    dewPoint: 5,
+                    cloudCover: 10,
+                    skyQuality: 21.5,
+                    windSpeed: 5,
+                    safe: true
+                };
+            }
 
             state.roof = {
                 name: 'Roof (simulated)',
@@ -321,6 +354,19 @@ class INDIWrapper {
         }
         console.log('[INDI] Roof close (simulated)');
         return { success: true };
+    }
+
+    // Calculate cloud cover from temperature differential
+    // Clear sky is much colder than ambient (~-30°C or more)
+    // Cloudy sky is closer to ambient temperature
+    calculateCloudCover(ambientTemp, skyTemp) {
+        if (ambientTemp == null || skyTemp == null) {
+            return null;  // Can't calculate without both readings
+        }
+        const diff = ambientTemp - skyTemp;
+        // diff >= 30°C = clear (0%), diff <= 0 = overcast (100%)
+        const cloudPercent = Math.max(0, Math.min(100, 100 - (diff / 30) * 100));
+        return Math.round(cloudPercent);
     }
 
     // Get mode info
