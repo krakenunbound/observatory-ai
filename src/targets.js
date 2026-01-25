@@ -538,6 +538,17 @@ function generateSessionPlan(targets, lat, lon) {
     plan.steps.push({ action: 'CLOSE_ROOF', description: 'Close observatory roof', status: 'pending', enabled: true });
     plan.steps.push({ action: 'WARM_CAMERA', description: 'Warm camera to ambient', status: 'pending', enabled: true });
 
+    // Add upload step (enabled by default, can be unchecked for test sessions)
+    const targetNames = plan.targets.map(t => t.id).join('-');
+    const sessionDate = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    plan.steps.push({
+        action: 'UPLOAD',
+        description: `Zip and upload to Google Drive`,
+        zipName: `${targetNames}_${sessionDate}_lights.zip`,
+        status: 'pending',
+        enabled: true
+    });
+
     plan.estimatedEnd = new Date(currentTime).toISOString();
     plan.totalExposureTimeHours = Math.round(plan.totalExposureTime / 3600 * 10) / 10;
 

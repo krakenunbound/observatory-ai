@@ -29,12 +29,80 @@ let currentSession = {
     log: []
 };
 
+// Autofocus state (for live V-curve display)
+let autofocusData = {
+    active: false,
+    points: [],           // [{position, hfr}, ...]
+    bestPosition: null,
+    minHFR: null,
+    slope: null,          // For V-curve fit
+    timestamp: null
+};
+
+// Focus tracking for refocus conditions
+let focusTracking = {
+    baselineHFR: null,        // HFR after initial autofocus
+    lastFocusTime: null,      // Timestamp of last autofocus
+    lastFocusPosition: null,  // Focuser position after last autofocus
+    refocusIntervalMin: 60,   // Refocus every N minutes (0 = disabled)
+    hfrDriftThreshold: 0.05,  // 5% HFR degradation triggers refocus
+    meridianFlipPending: false
+};
+
 function log(message) {
     const timestamp = new Date().toISOString();
     const entry = { timestamp, message };
     currentSession.log.push(entry);
     console.log(`[${timestamp}] ${message}`);
     return entry;
+}
+
+// Check if refocus is needed based on tracking conditions
+function checkRefocusNeeded(currentHFR = null) {
+    const reasons = [];
+
+    // 1. Time-based refocus
+    if (focusTracking.refocusIntervalMin > 0 && focusTracking.lastFocusTime) {
+        const elapsed = (Date.now() - focusTracking.lastFocusTime) / 60000; // minutes
+        if (elapsed >= focusTracking.refocusIntervalMin) {
+            reasons.push(`Time elapsed (${Math.round(elapsed)} min)`);
+        }
+    }
+
+    // 2. HFR drift detection
+    if (currentHFR && focusTracking.baselineHFR) {
+        const drift = (currentHFR - focusTracking.baselineHFR) / focusTracking.baselineHFR;
+        if (drift > focusTracking.hfrDriftThreshold) {
+            reasons.push(`HFR drift ${(drift * 100).toFixed(1)}%`);
+        }
+    }
+
+    // 3. Meridian flip occurred
+    if (focusTracking.meridianFlipPending) {
+        reasons.push('Meridian flip completed');
+    }
+
+    return reasons.length > 0 ? reasons : null;
+}
+
+// Convert FITS to JPG preview (creates copy, original untouched)
+const { exec } = require('child_process');
+function createFitsPreview(fitsPath) {
+    return new Promise((resolve) => {
+        const jpgPath = fitsPath.replace(/\.fits?$/i, '.jpg');
+        const scriptPath = path.join(__dirname, 'fits_preview.py');
+        // Use Python with astropy for proper astronomical stretching (MTF)
+        const cmd = `nix-shell -p python3Packages.numpy python3Packages.astropy python3Packages.pillow --run "python3 '${scriptPath}' '${fitsPath}' '${jpgPath}'"`;
+        exec(cmd, { timeout: 120000 }, (err, stdout, stderr) => {
+            if (err) {
+                console.log(`[Preview] Failed to create preview for ${path.basename(fitsPath)}: ${err.message}`);
+                resolve(false);
+            } else {
+                console.log(`[Preview] Created stretched JPG preview: ${path.basename(jpgPath)}`);
+                resolve(true);
+            }
+        });
+    });
 }
 
 // Plan an imaging session
@@ -890,9 +958,18 @@ const HTML = `<!DOCTYPE html>
                 <span style="background: linear-gradient(90deg, var(--cyan), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
                     ✦ Captured Images
                 </span>
-                <button onclick="refreshImages()" style="background: linear-gradient(135deg, var(--accent), var(--accent2)); border: none; color: white; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 0.8rem; box-shadow: 0 0 20px rgba(102, 126, 234, 0.3);">
-                    ↻ Refresh
-                </button>
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <button onclick="uploadToCloud()" style="background: linear-gradient(135deg, #f59e0b, #d97706); border: none; color: white; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 0.8rem; box-shadow: 0 0 20px rgba(245, 158, 11, 0.3);">
+                        ☁ Upload to Drive
+                    </button>
+                    <button onclick="generatePreviews()" style="background: linear-gradient(135deg, #22c55e, #16a34a); border: none; color: white; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 0.8rem; box-shadow: 0 0 20px rgba(34, 197, 94, 0.3);">
+                        ⚡ Generate Previews
+                    </button>
+                    <button onclick="refreshImages()" style="background: linear-gradient(135deg, var(--accent), var(--accent2)); border: none; color: white; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 0.8rem; box-shadow: 0 0 20px rgba(102, 126, 234, 0.3);">
+                        ↻ Refresh
+                    </button>
+                    <span id="uploadStatus" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+                </div>
             </h2>
             <div id="imageGallery" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; padding: 20px 10px;">
                 <div style="color: var(--text-muted); font-size: 0.9rem; grid-column: 1/-1; text-align: center; padding: 40px;">
@@ -1384,6 +1461,11 @@ const HTML = `<!DOCTYPE html>
                 displayPlanSteps(steps);
                 addLog('Executing: ' + step.description, 'info');
 
+                // Start V-curve polling for autofocus steps
+                if (step.action === 'AUTOFOCUS') {
+                    startAutofocusPolling();
+                }
+
                 try {
                     // Execute the step via API
                     const result = await executeStep(step);
@@ -1391,6 +1473,10 @@ const HTML = `<!DOCTYPE html>
                     if (result.success) {
                         step.status = 'completed';
                         addLog('Completed: ' + step.description, 'success');
+                        // Fetch final autofocus data after completion
+                        if (step.action === 'AUTOFOCUS') {
+                            fetchAutofocusData();
+                        }
                     } else {
                         step.status = 'failed';
                         addLog('Failed: ' + step.description + ' - ' + (result.error || 'Unknown error'), 'error');
@@ -1773,22 +1859,43 @@ const HTML = `<!DOCTYPE html>
             }
         }
 
-        // Fetch autofocus data
+        // Fetch autofocus data (polls during active autofocus)
+        let autofocusPolling = null;
         async function fetchAutofocusData() {
             try {
-                const resp = await fetch(PORTAL_URL + '/api/autofocus/latest');
+                const resp = await fetch('/api/autofocus/latest');
                 if (resp.ok) {
                     const data = await resp.json();
                     if (data.success && data.vcurve) {
                         drawVCurve(data.vcurve);
-                        document.getElementById('vcurveInfo').textContent =
-                            'Best: ' + data.vcurve.bestPosition + ' | HFR: ' + data.vcurve.minHFR.toFixed(2) + '"';
+                        const info = document.getElementById('vcurveInfo');
+                        if (data.active) {
+                            info.textContent = 'Focusing... ' + data.vcurve.points.length + ' points';
+                            info.style.color = 'var(--gold)';
+                        } else if (data.vcurve.bestPosition) {
+                            info.textContent = 'Best: ' + data.vcurve.bestPosition + ' | HFR: ' + data.vcurve.minHFR.toFixed(2) + '"';
+                            info.style.color = 'var(--green)';
+                        }
+                    }
+                    // Poll faster during active autofocus
+                    if (data.active && !autofocusPolling) {
+                        autofocusPolling = setInterval(fetchAutofocusData, 2000);
+                    } else if (!data.active && autofocusPolling) {
+                        clearInterval(autofocusPolling);
+                        autofocusPolling = null;
                     }
                 }
             } catch (e) {
                 drawVCurve(null);
             }
         }
+        // Start polling for autofocus when step starts
+        function startAutofocusPolling() {
+            if (!autofocusPolling) {
+                autofocusPolling = setInterval(fetchAutofocusData, 2000);
+            }
+        }
+        window.startAutofocusPolling = startAutofocusPolling;
 
         // Fetch plate solve data
         async function fetchPlateSolveData() {
@@ -1983,6 +2090,49 @@ const HTML = `<!DOCTYPE html>
         }
         window.refreshImages = refreshImages;
 
+        async function generatePreviews() {
+            const gallery = document.getElementById('imageGallery');
+            const origHtml = gallery.innerHTML;
+            gallery.innerHTML = '<div style="color: var(--gold); text-align: center; padding: 40px; grid-column: 1/-1;">⚡ Generating FITS previews... (this may take a moment)</div>';
+            try {
+                const resp = await fetch('/api/images/generate-previews');
+                const data = await resp.json();
+                if (data.success) {
+                    alert('Generated ' + data.generated + ' new previews (of ' + data.total + ' FITS files)');
+                    refreshImages();
+                } else {
+                    alert('Error: ' + data.error);
+                    gallery.innerHTML = origHtml;
+                }
+            } catch (e) {
+                alert('Failed to generate previews: ' + e.message);
+                gallery.innerHTML = origHtml;
+            }
+        }
+        window.generatePreviews = generatePreviews;
+
+        async function uploadToCloud() {
+            const status = document.getElementById('uploadStatus');
+            status.textContent = 'Uploading to Google Drive...';
+            status.style.color = 'var(--gold)';
+            try {
+                const resp = await fetch('/api/cloud/upload', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    status.textContent = 'Uploaded ' + data.uploaded + ' files to Drive';
+                    status.style.color = 'var(--green)';
+                } else {
+                    status.textContent = 'Upload failed: ' + data.error;
+                    status.style.color = 'var(--red)';
+                }
+            } catch (e) {
+                status.textContent = 'Upload error: ' + e.message;
+                status.style.color = 'var(--red)';
+            }
+            setTimeout(() => { status.textContent = ''; }, 10000);
+        }
+        window.uploadToCloud = uploadToCloud;
+
         function viewImage(filename) {
             const viewer = document.getElementById('imageViewer');
             const img = document.getElementById('viewerImage');
@@ -2047,6 +2197,22 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // API: Get latest autofocus data (for live V-curve display)
+    if (url.pathname === '/api/autofocus/latest') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            active: autofocusData.active,
+            vcurve: autofocusData.points.length > 0 ? {
+                points: autofocusData.points,
+                bestPosition: autofocusData.bestPosition,
+                minHFR: autofocusData.minHFR,
+                slope: autofocusData.slope
+            } : null
+        }));
+        return;
+    }
+
     // API: List captured images
     if (url.pathname === '/api/images') {
         const imageDir = '/home/kraken/images';
@@ -2068,6 +2234,59 @@ const server = http.createServer(async (req, res) => {
         } catch (e) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify([]));
+        }
+        return;
+    }
+
+    // API: Generate JPG previews for all FITS files missing them
+    if (url.pathname === '/api/images/generate-previews') {
+        const imageDir = '/home/kraken/images';
+        try {
+            const files = fs.readdirSync(imageDir).filter(f => /\.fits?$/i.test(f));
+            let generated = 0;
+            const promises = files.map(async (fitsFile) => {
+                const fitsPath = path.join(imageDir, fitsFile);
+                const jpgPath = fitsPath.replace(/\.fits?$/i, '.jpg');
+                if (!fs.existsSync(jpgPath)) {
+                    const ok = await createFitsPreview(fitsPath);
+                    if (ok) generated++;
+                }
+            });
+            await Promise.all(promises);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, generated, total: files.length }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // API: Upload FITS files to Google Drive
+    if (url.pathname === '/api/cloud/upload' && req.method === 'POST') {
+        const imageDir = '/home/kraken/images';
+        try {
+            const files = fs.readdirSync(imageDir).filter(f => /\.fits?$/i.test(f));
+            if (files.length === 0) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, uploaded: 0, message: 'No FITS files to upload' }));
+                return;
+            }
+
+            // Use rclone copy with bandwidth limit (safer for remote connections)
+            const { execSync } = require('child_process');
+            const result = execSync(
+                `rclone copy "${imageDir}" gdrive:Observatory --include "*.fits" --include "*.fit" --bwlimit 2M 2>&1`,
+                { timeout: 600000, encoding: 'utf8' }
+            );
+
+            console.log('[Cloud] Uploaded FITS files to Google Drive');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, uploaded: files.length }));
+        } catch (e) {
+            console.error('[Cloud] Upload failed:', e.message);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
         }
         return;
     }
@@ -2201,6 +2420,42 @@ const server = http.createServer(async (req, res) => {
                         }
                         break;
 
+                    case 'UPLOAD':
+                        try {
+                            const { execSync } = require('child_process');
+                            const imageDir = '/home/kraken/images';
+                            const zipName = step.zipName || `session_${new Date().toISOString().slice(0,10)}_lights.zip`;
+                            const zipPath = path.join(imageDir, zipName);
+
+                            // Get list of FITS files
+                            const fitsFiles = fs.readdirSync(imageDir).filter(f => /\.fits?$/i.test(f));
+                            if (fitsFiles.length === 0) {
+                                log('No FITS files to upload');
+                                break;
+                            }
+
+                            log(`Zipping ${fitsFiles.length} FITS files to ${zipName}...`);
+
+                            // Create zip with all FITS files
+                            const fileList = fitsFiles.map(f => `"${f}"`).join(' ');
+                            execSync(`cd "${imageDir}" && zip -j "${zipPath}" ${fileList}`, { timeout: 300000 });
+
+                            const zipSize = fs.statSync(zipPath).size;
+                            log(`Zip created: ${zipName} (${(zipSize/1024/1024).toFixed(1)} MB)`);
+
+                            // Upload to Google Drive with bandwidth limit
+                            log('Uploading to Google Drive (this may take a while)...');
+                            execSync(`rclone copy "${zipPath}" gdrive:Observatory/ --bwlimit 2M`, { timeout: 1800000 });
+                            log(`Upload complete: ${zipName} uploaded to Google Drive`);
+
+                            result.zipName = zipName;
+                            result.filesZipped = fitsFiles.length;
+                        } catch (e) {
+                            log('Upload failed: ' + e.message);
+                            // Don't fail entire session for upload error
+                        }
+                        break;
+
                     case 'OPEN_ROOF':
                         try {
                             const roofResp = await fetch('http://localhost:8081/api/roof/open', { method: 'POST' });
@@ -2274,6 +2529,17 @@ const server = http.createServer(async (req, res) => {
                     case 'AUTOFOCUS':
                         try {
                             log('Starting autofocus routine...');
+
+                            // Reset autofocus data for live display
+                            autofocusData = {
+                                active: true,
+                                points: [],
+                                bestPosition: null,
+                                minHFR: null,
+                                slope: null,
+                                timestamp: Date.now()
+                            };
+
                             // Simple autofocus: move focuser through range and find best position
                             // This is a basic V-curve autofocus implementation
                             const focusState = indi.getState();
@@ -2304,17 +2570,50 @@ const server = http.createServer(async (req, res) => {
 
                                 log(`Focus pos ${pos}: HFD = ${simulatedHFD.toFixed(2)}`);
 
+                                // Add point to live V-curve data
+                                autofocusData.points.push({ position: pos, hfr: simulatedHFD });
+
                                 if (simulatedHFD < bestHFD) {
                                     bestHFD = simulatedHFD;
                                     bestPos = pos;
+                                    autofocusData.bestPosition = bestPos;
+                                    autofocusData.minHFR = bestHFD;
                                 }
                             }
+
+                            // Calculate V-curve slope (for fit line)
+                            if (autofocusData.points.length >= 3) {
+                                // Simple slope: average change in HFR per step from best
+                                const leftPoints = autofocusData.points.filter(p => p.position < bestPos);
+                                const rightPoints = autofocusData.points.filter(p => p.position > bestPos);
+                                let totalSlope = 0;
+                                let slopeCount = 0;
+                                leftPoints.forEach(p => {
+                                    totalSlope += (p.hfr - bestHFD) / Math.abs(p.position - bestPos);
+                                    slopeCount++;
+                                });
+                                rightPoints.forEach(p => {
+                                    totalSlope += (p.hfr - bestHFD) / Math.abs(p.position - bestPos);
+                                    slopeCount++;
+                                });
+                                autofocusData.slope = slopeCount > 0 ? totalSlope / slopeCount : 0.01;
+                            }
+
+                            autofocusData.active = false;
+                            autofocusData.timestamp = Date.now();
 
                             // Move to best position
                             log(`Best focus at position ${bestPos} (HFD: ${bestHFD.toFixed(2)})`);
                             await indi.focuserMove(bestPos);
-                            log('Autofocus complete');
+
+                            // Save baseline for refocus tracking
+                            focusTracking.baselineHFR = bestHFD;
+                            focusTracking.lastFocusTime = Date.now();
+                            focusTracking.lastFocusPosition = bestPos;
+                            focusTracking.meridianFlipPending = false;
+                            log('Autofocus complete - baseline HFR saved');
                         } catch (e) {
+                            autofocusData.active = false;
                             result = { success: false, error: 'Autofocus failed: ' + e.message };
                         }
                         break;
@@ -2391,6 +2690,10 @@ const server = http.createServer(async (req, res) => {
                                 if (expResult.imagePath) {
                                     capturedImages.push(expResult.imagePath);
                                     log(`Exposure ${i} saved: ${expResult.imagePath}`);
+                                    // Create JPG preview copy (original FITS untouched)
+                                    createFitsPreview(expResult.imagePath).then(ok => {
+                                        if (ok) log(`Preview created for exposure ${i}`);
+                                    });
                                 }
 
                                 // Small delay between exposures for download
