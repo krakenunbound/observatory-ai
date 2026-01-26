@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const INDIWrapper = require('./src/indi-wrapper');
 const { TARGETS, calculateAltAz, findImagingWindow, suggestParameters, getRankedTargets, generateSessionPlan } = require('./src/targets');
 
@@ -80,6 +81,141 @@ let sessionProgress = {
 };
 
 // ============================================================================
+// AMBIENT WEATHER STATION (WS-2902D)
+// ============================================================================
+// Receives data pushed from weather station via Custom Server feature
+let ambientWeather = {
+    latest: null,           // Most recent reading
+    history: [],            // Last 24h of readings (max 2880 at 30s intervals)
+    lastUpdate: null,
+    connected: false
+};
+
+const WEATHER_HISTORY_FILE = path.join(os.homedir(), '.observatory', 'ambient-weather-history.json');
+
+// Load weather history on startup
+function loadWeatherHistory() {
+    try {
+        if (fs.existsSync(WEATHER_HISTORY_FILE)) {
+            const data = JSON.parse(fs.readFileSync(WEATHER_HISTORY_FILE, 'utf8'));
+            ambientWeather.history = data.slice(-2880); // Keep last 24h
+            if (ambientWeather.history.length > 0) {
+                ambientWeather.latest = ambientWeather.history[ambientWeather.history.length - 1];
+                ambientWeather.lastUpdate = ambientWeather.latest.received_at;
+            }
+            console.log(`[Weather] Loaded ${ambientWeather.history.length} historical readings`);
+        }
+    } catch (err) {
+        console.log('[Weather] No history file or error loading:', err.message);
+    }
+}
+
+// Save weather history periodically
+function saveWeatherHistory() {
+    try {
+        const dir = path.dirname(WEATHER_HISTORY_FILE);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.writeFileSync(WEATHER_HISTORY_FILE, JSON.stringify(ambientWeather.history.slice(-2880)));
+    } catch (err) {
+        console.error('[Weather] Error saving history:', err.message);
+    }
+}
+
+// Process incoming weather data from station
+function processWeatherData(params) {
+    const data = {
+        // Timestamps
+        received_at: new Date().toISOString(),
+        dateutc: params.dateutc,
+        // Outdoor conditions
+        tempf: parseFloat(params.tempf) || null,
+        humidity: parseFloat(params.humidity) || null,
+        dewPoint: parseFloat(params.dewPoint) || null,
+        feelsLike: parseFloat(params.feelsLike) || null,
+        // Wind
+        windspeedmph: parseFloat(params.windspeedmph) || 0,
+        windgustmph: parseFloat(params.windgustmph) || 0,
+        winddir: parseFloat(params.winddir) || 0,
+        // Pressure
+        baromrelin: parseFloat(params.baromrelin) || null,
+        baromabsin: parseFloat(params.baromabsin) || null,
+        // Rain
+        rainratein: parseFloat(params.rainratein) || 0,
+        dailyrainin: parseFloat(params.dailyrainin) || 0,
+        weeklyrainin: parseFloat(params.weeklyrainin) || 0,
+        monthlyrainin: parseFloat(params.monthlyrainin) || 0,
+        // Solar
+        solarradiation: parseFloat(params.solarradiation) || 0,
+        uv: parseFloat(params.uv) || 0,
+        // Indoor
+        tempinf: parseFloat(params.tempinf) || null,
+        humidityin: parseFloat(params.humidityin) || null,
+        // Station info
+        stationtype: params.stationtype,
+        model: params.model
+    };
+
+    ambientWeather.latest = data;
+    ambientWeather.lastUpdate = data.received_at;
+    ambientWeather.connected = true;
+    ambientWeather.history.push(data);
+
+    // Keep only last 24h (2880 readings at 30s intervals)
+    if (ambientWeather.history.length > 2880) {
+        ambientWeather.history = ambientWeather.history.slice(-2880);
+    }
+
+    // Save history every 10 readings (~5 minutes)
+    if (ambientWeather.history.length % 10 === 0) {
+        saveWeatherHistory();
+    }
+
+    console.log(`[Weather] Data received: ${data.tempf}°F, ${data.humidity}% humidity, wind ${data.windspeedmph} mph`);
+    return data;
+}
+
+// Check if weather is safe for imaging
+function isWeatherSafe() {
+    if (!ambientWeather.latest) return { safe: false, reason: 'No weather data' };
+
+    const w = ambientWeather.latest;
+    const issues = [];
+
+    // Check humidity (>85% is risky for dew)
+    if (w.humidity > 85) issues.push(`High humidity: ${w.humidity}%`);
+
+    // Check wind (>20 mph causes tracking issues)
+    if (w.windspeedmph > 20) issues.push(`High wind: ${w.windspeedmph} mph`);
+    if (w.windgustmph > 30) issues.push(`Strong gusts: ${w.windgustmph} mph`);
+
+    // Check rain
+    if (w.rainratein > 0) issues.push(`Rain detected: ${w.rainratein} in/hr`);
+
+    // Check dew point proximity (within 5°F is risky)
+    if (w.tempf && w.dewPoint && (w.tempf - w.dewPoint) < 5) {
+        issues.push(`Dew risk: temp ${w.tempf}°F, dew point ${w.dewPoint}°F`);
+    }
+
+    return {
+        safe: issues.length === 0,
+        issues: issues,
+        conditions: {
+            temperature: w.tempf,
+            humidity: w.humidity,
+            dewPoint: w.dewPoint,
+            wind: w.windspeedmph,
+            gusts: w.windgustmph,
+            rain: w.rainratein > 0
+        }
+    };
+}
+
+// Load history on module load
+loadWeatherHistory();
+
+// ============================================================================
 // FOCUSER PROFILING SYSTEM
 // ============================================================================
 
@@ -92,7 +228,6 @@ const SCOPE_DEFAULTS = {
 };
 
 // Profile storage directory
-const os = require('os');
 const PROFILE_DIR = path.join(os.homedir(), '.observatory', 'focuser-profiles');
 
 // Active focuser profile
@@ -3628,10 +3763,82 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
+    // DEBUG: Log all incoming requests from weather station IP
+    const clientIP = req.socket.remoteAddress;
+    if (clientIP && (clientIP.includes('192.168.2.80') || clientIP.includes('192.168.2'))) {
+        console.log(`[DEBUG] Request from ${clientIP}: ${req.method} ${req.url}`);
+    }
+
     // Serve main page
     if (url.pathname === '/' || url.pathname === '/index.html') {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(HTML);
+        return;
+    }
+
+    // ========================================================================
+    // AMBIENT WEATHER STATION ENDPOINTS
+    // ========================================================================
+
+    // Receive weather data from station (various paths and methods)
+    // Handle firmware quirk: some stations send /data/report/&key=val instead of /data/report/?key=val
+    let weatherPath = url.pathname;
+    let weatherParams = Object.fromEntries(url.searchParams);
+
+    // Check for &-separated params in path (firmware quirk)
+    if (Object.keys(weatherParams).length === 0 && req.url.includes('&')) {
+        const ampIndex = req.url.indexOf('&');
+        weatherPath = req.url.substring(0, ampIndex);
+        const queryPart = req.url.substring(ampIndex + 1);
+        const searchParams = new URLSearchParams(queryPart);
+        weatherParams = Object.fromEntries(searchParams);
+    }
+
+    // Normalize path (strip trailing slash)
+    const normalizedPath = weatherPath.replace(/\/+$/, '') || '/';
+    const weatherPaths = ['/data/report', '/data', '/weatherstation/updateweatherstation.php', '/weatherstation/updateweatherstation', '/'];
+
+    if (weatherPaths.includes(normalizedPath)) {
+        let params = weatherParams;
+
+        if (req.method === 'POST') {
+            // Handle POST data
+            let body = '';
+            req.on('data', chunk => body += chunk.toString());
+            await new Promise(resolve => req.on('end', resolve));
+            const urlParams = new URLSearchParams(body);
+            params = Object.fromEntries(urlParams);
+        }
+
+        if (params.tempf || params.PASSKEY || params.stationtype) {
+            processWeatherData(params);
+            console.log(`[Weather] Received data via ${req.method} ${normalizedPath}`);
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end('success');
+        } else {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end('ok');
+        }
+        return;
+    }
+
+    // API: Get latest weather data
+    if (url.pathname === '/api/weather' || url.pathname === '/api/weather/latest') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            connected: ambientWeather.connected,
+            lastUpdate: ambientWeather.lastUpdate,
+            current: ambientWeather.latest,
+            safe: isWeatherSafe()
+        }));
+        return;
+    }
+
+    // API: Get weather history
+    if (url.pathname === '/api/weather/history') {
+        const limit = parseInt(url.searchParams.get('limit')) || 100;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(ambientWeather.history.slice(-limit)));
         return;
     }
 
