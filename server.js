@@ -1917,8 +1917,13 @@ const HTML = `<!DOCTYPE html>
     <script type="module">
         import { animate, stagger, createTimeline } from 'https://cdn.jsdelivr.net/npm/animejs/+esm';
 
-        // Set portal link
-        document.getElementById('portalLink').href = 'http://' + window.location.hostname + ':8081';
+        // Set portal link - use path routing for tunnel, port for local
+        const isTunnel = window.location.hostname.includes('krakenunbound.com');
+        if (isTunnel) {
+            document.getElementById('portalLink').href = window.location.origin + '/';
+        } else {
+            document.getElementById('portalLink').href = 'http://' + window.location.hostname + ':8081';
+        }
 
         // Deep Space Canvas
         const canvas = document.getElementById('spaceCanvas');
