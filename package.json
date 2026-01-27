@@ -12,7 +12,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "http://claude:claudebot2026@localhost:3000/claude/observatory-ai.git"
+    "url": "https://github.com/krakenunbound/observatory-ai.git"
   },
   "keywords": [],
   "author": "",

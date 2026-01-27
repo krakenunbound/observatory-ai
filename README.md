@@ -1,92 +1,172 @@
 # Observatory AI Control System
 
-A real telescope control and plate-solving system for automated astrophotography.
+A comprehensive web-based telescope control and automation system for astronomical observatories. Built with Node.js and integrating with INDI (Instrument Neutral Distributed Interface) for real hardware control.
 
 ## Features
 
-- **Real INDI Integration**: Connects to actual INDI server (port 7624) with XML protocol
-- **ASTAP Plate Solving**: Built from source, uses D80 Gaia database (1.2GB)
-- **Session Planning**: Calculate optimal imaging windows for deep sky objects
-- **14 DSO Targets**: M1, M31, M33, M42, M45, M51, M57, M101, NGC 7000, IC 1396, etc.
-- **Full Workflow Automation**: Safety → Roof → Cool → Unpark → Slew → Solve → Focus → Guide → Capture → Shutdown
+- **Real INDI Integration**: Connects to INDI server for telescope, camera, focuser, and weather control
+- **ASTAP Plate Solving**: Built-in plate solving with Gaia DR3 database support
+- **Session Planning**: Automatic calculation of optimal imaging windows for DSO targets
+- **Mount Modeling**: 10Micron GM2000 alignment model visualization and management
+- **Focuser Profiling**: Automated backlash measurement and temperature compensation
+- **Weather Safety**: Integrated weather monitoring with automatic safety responses
+- **Full Workflow Automation**: Safety → Roof → Cool → Unpark → Slew → Solve → Focus → Guide → Capture
+
+## Screenshots
+
+The web interface provides:
+- Real-time equipment status dashboard
+- Target selection with 14+ DSO objects
+- Mount modeling sky map with alignment points
+- Session logs and image gallery
+- Manual override controls
 
 ## Installation
 
-### Prerequisites (NixOS)
-```bash
-nix-env -iA nixos.indilib nixos.indi-full nixos.fpc nixos.lazarus
-```
+### Prerequisites
 
-### ASTAP Plate Solver
-Built from source (pre-built binaries don't work on NixOS):
-```bash
-git clone https://github.com/han-k59/astap
-cd astap
-lazbuild --lazarusdir=/nix/var/nix/profiles/default/share/lazarus -B astap_command_line_linux.lpi
-cp astap_cli ~/bin/
-```
+- Node.js 18+
+- INDI server with appropriate drivers
+- ASTAP plate solver (optional but recommended)
 
-### D80 Star Database
-Download from [hnsky.org](https://www.hnsky.org/astap.htm) or via Google Drive.
-Extract to `~/.local/share/astap/`
+### Quick Start
 
-### Run
 ```bash
-cd /home/kraken/projects/observatory-ai
+# Clone the repository
+git clone https://github.com/yourusername/observatory-ai.git
+cd observatory-ai
+
+# Install dependencies
+npm install
+
+# Start the server
 node server.js
 ```
-Access at http://192.168.2.65:8092
+
+The server will start on port 8092: http://localhost:8092
+
+### ASTAP Setup (Optional)
+
+For plate solving support:
+
+1. Download ASTAP from [hnsky.org](https://www.hnsky.org/astap.htm)
+2. Download the D80 star database (~1.2GB)
+3. Extract database to `~/.local/share/astap/`
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Web Interface                         │
-│                    (port 8092)                          │
-├─────────────────────────────────────────────────────────┤
-│                     server.js                            │
-├──────────────┬──────────────────┬───────────────────────┤
-│ indi-wrapper │   astap-solver   │   session-planner     │
-├──────────────┼──────────────────┼───────────────────────┤
-│ indi-client  │   astap_cli      │   target-database     │
-│ (XML/TCP)    │   (D80 database) │   (14 DSOs)           │
-├──────────────┴──────────────────┴───────────────────────┤
-│              INDI Server (port 7624)                     │
-│     Telescope | Camera | Focuser | FilterWheel          │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Web Interface (port 8092)                     │
+├─────────────────────────────────────────────────────────────────┤
+│                         server.js                                │
+├──────────────┬──────────────────┬───────────────────────────────┤
+│ indi-wrapper │   astap-solver   │      mount-modeling           │
+├──────────────┼──────────────────┼───────────────────────────────┤
+│ indi-client  │   astap_cli      │   LX200 protocol              │
+│ (XML/TCP)    │   (D80 database) │   (10Micron specific)         │
+├──────────────┴──────────────────┴───────────────────────────────┤
+│                   INDI Server (port 7624)                        │
+│          Telescope | Camera | Focuser | Weather                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## Plate Solving Performance
+## Supported Hardware
 
-Tested on real astrophotography data (M33 Triangulum Galaxy):
+| Device Type | Tested Models | INDI Driver |
+|-------------|---------------|-------------|
+| Mount | 10Micron GM2000 | indi_lx200_10micron |
+| Camera | QHY 600C | indi_qhy_ccd |
+| Focuser | Pegasus FocusCube 2 | indi_pegasus_focuscube |
+| Weather | Pegasus Uranus | indi_pegasus_uranus |
 
-| Metric | Value |
-|--------|-------|
-| Solve time (unknown FOV) | 6.4 seconds |
-| Solve time (known FOV) | 0.6-0.8 seconds |
-| Accuracy | < 1 arcminute |
-| Database | D80 (Gaia DR3, mag 18) |
-| FOV range | 0.15° - 6° |
+## API Reference
 
-## API Endpoints
+### Session Control
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /` | Web interface |
-| `GET /api/status` | System status |
-| `GET /api/targets` | Available DSO targets |
-| `GET /api/mode` | INDI mode (real/simulation) |
-| `POST /api/plan` | Create imaging session |
-| `POST /api/execute/:step` | Execute workflow step |
-| `POST /api/solve` | Plate solve an image |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `GET /api/status` | GET | Full system status |
+| `GET /api/targets` | GET | Available DSO targets |
+| `POST /api/plan` | POST | Create imaging session |
+| `POST /api/execute/:step` | POST | Execute workflow step |
 
-## Files
+### Mount Control
 
-- `server.js` - Main Express server
-- `src/indi-client.js` - Real INDI XML protocol client
-- `src/indi-wrapper.js` - Auto-detects real/simulation mode
-- `src/astap-solver.js` - ASTAP CLI wrapper
-- `src/simulator.js` - Fallback hardware simulation
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `GET /api/mount/status` | GET | Mount position and state |
+| `POST /api/mount/slew` | POST | Slew to coordinates |
+| `POST /api/mount/park` | POST | Park mount |
+| `GET /api/mount/model` | GET | Alignment model info |
+
+### Camera Control
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `GET /api/camera/status` | GET | Camera state |
+| `POST /api/camera/expose` | POST | Take exposure |
+
+### Plate Solving
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `POST /api/solve` | POST | Solve an image |
+
+## Configuration
+
+Configuration is done via environment variables or editing `server.js`:
+
+```javascript
+// Observatory location
+const OBSERVATORY = {
+    latitude: 34.0522,
+    longitude: -118.2437,
+    elevation: 100
+};
+
+// INDI server
+const INDI_HOST = 'localhost';
+const INDI_PORT = 7624;
+```
+
+## Documentation
+
+- [User Manual](docs/USER-MANUAL.md) - Complete usage guide
+- [Architecture](docs/architecture.md) - System design
+- [Hardware Inventory](docs/hardware-inventory.md) - Supported equipment
+- [10Micron Modeling](docs/10MICRON-MODELING.md) - Mount modeling reference
+
+## Project Structure
+
+```
+observatory-ai/
+├── server.js              # Main Express server
+├── src/
+│   ├── indi-client.js     # INDI XML protocol client
+│   ├── indi-wrapper.js    # Auto-detect real/simulation
+│   ├── astap-solver.js    # ASTAP CLI wrapper
+│   ├── mount-modeling.js  # 10Micron LX200 commands
+│   ├── plate-solve.js     # Plate solving utilities
+│   └── targets.js         # DSO target database
+├── docs/
+│   ├── USER-MANUAL.md     # User documentation
+│   ├── architecture.md    # System architecture
+│   └── 10MICRON-MODELING.md
+└── package.json
+```
+
+## Recent Updates
+
+### v1.1.0 (January 2026)
+- Added Mount Modeling sky map visualization
+- Fibonacci spiral algorithm for optimal point distribution
+- Fast focuser profiling (~10 min vs 60+ min)
+
+### v1.0.0
+- Initial release with INDI integration
+- ASTAP plate solving
+- Session automation workflow
 
 ## Credits
 
@@ -96,4 +176,8 @@ Tested on real astrophotography data (M33 Triangulum Galaxy):
 
 ## License
 
-MIT
+MIT License - See [LICENSE](LICENSE) file for details.
+
+---
+
+*Built for the GMARS (Gold Mountain Astronomical Research Station) observatory*
