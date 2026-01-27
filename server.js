@@ -3,7 +3,15 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const INDIWrapper = require('./src/indi-wrapper');
+const MountModeling = require('./src/mount-modeling');
 const { TARGETS, calculateAltAz, findImagingWindow, suggestParameters, getRankedTargets, generateSessionPlan } = require('./src/targets');
+
+// Mount modeling direct connection (bypasses INDI for LX200 commands)
+const mountModeling = new MountModeling({
+    host: '192.168.1.103',
+    port: 3490,
+    timeout: 5000
+});
 
 const PORT = 8092;
 const INDI_HOST = process.env.INDI_HOST || 'localhost';
@@ -2015,6 +2023,68 @@ const HTML = `<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- Mount Modeling Panel -->
+        <div class="panel" style="margin-top: 20px;">
+            <h2 style="display: flex; align-items: center; justify-content: space-between;">
+                <span>Mount Modeling</span>
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <span id="modelStatus" style="font-size: 0.75rem; color: var(--text-muted);">--</span>
+                    <button onclick="refreshModelData()" class="btn btn-primary" style="padding: 6px 12px; font-size: 0.8rem;">Refresh</button>
+                    <button onclick="generateOptimalPoints()" class="btn btn-success" style="padding: 6px 12px; font-size: 0.8rem;">Generate Points</button>
+                </div>
+            </h2>
+            <div style="display: grid; grid-template-columns: 1fr 300px; gap: 20px; margin-top: 15px;">
+                <!-- Sky Map Canvas -->
+                <div style="position: relative; background: rgba(0,0,0,0.4); border-radius: 12px; padding: 10px;">
+                    <canvas id="skyMapCanvas" width="600" height="400" style="width: 100%; height: 400px; border-radius: 8px;"></canvas>
+                    <div id="skyMapTooltip" style="display: none; position: absolute; background: rgba(0,0,0,0.9); border: 1px solid var(--accent); padding: 8px 12px; border-radius: 6px; font-size: 0.75rem; pointer-events: none; z-index: 100;"></div>
+                </div>
+                <!-- Model Info & Controls -->
+                <div style="display: flex; flex-direction: column; gap: 15px;">
+                    <div style="background: rgba(0,0,0,0.3); border-radius: 10px; padding: 15px;">
+                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">CURRENT MODEL</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                            <div>
+                                <div style="font-size: 2rem; font-weight: 300; color: var(--cyan);" id="modelPointCount">--</div>
+                                <div style="font-size: 0.7rem; color: var(--text-muted);">Alignment Stars</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 2rem; font-weight: 300; color: var(--accent2);" id="modelSavedCount">--</div>
+                                <div style="font-size: 0.7rem; color: var(--text-muted);">Saved Models</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.3); border-radius: 10px; padding: 15px;">
+                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">REFRACTION</div>
+                        <div style="display: flex; gap: 15px;">
+                            <div>
+                                <span style="color: var(--gold);" id="modelTemp">--</span>
+                                <span style="font-size: 0.7rem; color: var(--text-muted);">C</span>
+                            </div>
+                            <div>
+                                <span style="color: var(--gold);" id="modelPressure">--</span>
+                                <span style="font-size: 0.7rem; color: var(--text-muted);">hPa</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.3); border-radius: 10px; padding: 15px;">
+                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 10px;">POINT DISTRIBUTION</div>
+                        <label style="display: block; margin-bottom: 8px;">
+                            <span style="font-size: 0.7rem; color: var(--text-muted);">Target Points:</span>
+                            <input type="number" id="targetPointCount" value="30" min="6" max="100" style="width: 60px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); color: var(--text); padding: 4px 8px; border-radius: 4px; margin-left: 8px;">
+                        </label>
+                        <label style="display: block; margin-bottom: 10px;">
+                            <span style="font-size: 0.7rem; color: var(--text-muted);">Min Altitude:</span>
+                            <input type="number" id="minAltitude" value="20" min="10" max="45" style="width: 60px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); color: var(--text); padding: 4px 8px; border-radius: 4px; margin-left: 8px;">
+                            <span style="font-size: 0.7rem; color: var(--text-muted);">deg</span>
+                        </label>
+                        <div id="generatedPointsList" style="font-size: 0.7rem; color: var(--text-muted); max-height: 100px; overflow-y: auto;"></div>
+                    </div>
+                    <button onclick="deleteAlignmentModel()" class="btn btn-danger" style="margin-top: auto;">Delete Model</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Image Gallery - Full Width at Bottom -->
         <div class="panel" style="margin-top: 30px; background: linear-gradient(180deg, rgba(15,15,35,0.95) 0%, rgba(5,5,20,0.98) 100%);">
             <h2 style="display: flex; align-items: center; justify-content: space-between;">
@@ -3278,6 +3348,266 @@ const HTML = `<!DOCTYPE html>
         // Poll mount status
         fetchMountStatus();
         setInterval(fetchMountStatus, 5000);
+
+        // ========================================
+        // Mount Modeling Functions
+        // ========================================
+
+        let modelData = { points: [], count: 0 };
+        let generatedPoints = [];
+
+        async function refreshModelData() {
+            const statusEl = document.getElementById('modelStatus');
+            statusEl.textContent = 'Loading...';
+            statusEl.style.color = 'var(--gold)';
+
+            try {
+                // Fetch model summary
+                const modelResp = await fetch('/api/mount/model');
+                if (modelResp.ok) {
+                    const data = await modelResp.json();
+                    document.getElementById('modelPointCount').textContent = data.alignmentStars || 0;
+                    document.getElementById('modelSavedCount').textContent = data.savedModels || 0;
+                    document.getElementById('modelTemp').textContent = data.refraction?.temperature?.toFixed(1) || '--';
+                    document.getElementById('modelPressure').textContent = data.refraction?.pressure?.toFixed(1) || '--';
+                }
+
+                // Fetch alignment points
+                const pointsResp = await fetch('/api/mount/model/points');
+                if (pointsResp.ok) {
+                    const data = await pointsResp.json();
+                    modelData = data;
+                    renderSkyMap();
+                    statusEl.textContent = data.count + ' points loaded';
+                    statusEl.style.color = 'var(--green)';
+                } else {
+                    statusEl.textContent = 'Mount not connected';
+                    statusEl.style.color = 'var(--red)';
+                    renderSkyMap(); // Still render empty map
+                }
+            } catch (e) {
+                console.error('Model fetch error:', e);
+                statusEl.textContent = 'Error: ' + e.message;
+                statusEl.style.color = 'var(--red)';
+                renderSkyMap();
+            }
+        }
+        window.refreshModelData = refreshModelData;
+
+        function renderSkyMap() {
+            const canvas = document.getElementById('skyMapCanvas');
+            const ctx = canvas.getContext('2d');
+            const tooltip = document.getElementById('skyMapTooltip');
+
+            // Set actual canvas size
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width * window.devicePixelRatio;
+            canvas.height = rect.height * window.devicePixelRatio;
+            ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+            const width = rect.width;
+            const height = rect.height;
+            const centerX = width / 2;
+            const centerY = height / 2;
+            const radius = Math.min(width, height) / 2 - 30;
+
+            // Clear and draw background
+            ctx.fillStyle = '#080818';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw horizon circle and altitude rings
+            ctx.strokeStyle = 'rgba(102, 126, 234, 0.3)';
+            ctx.lineWidth = 1;
+
+            // Altitude rings (0, 30, 60, 90)
+            [0, 30, 60, 90].forEach((alt, i) => {
+                const r = radius * (90 - alt) / 90;
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, r, 0, Math.PI * 2);
+                ctx.stroke();
+
+                // Label
+                if (alt > 0) {
+                    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+                    ctx.font = '10px sans-serif';
+                    ctx.fillText(alt + '\u00B0', centerX + 3, centerY - r + 12);
+                }
+            });
+
+            // Azimuth lines (N, E, S, W)
+            const directions = [{az: 0, label: 'N'}, {az: 90, label: 'E'}, {az: 180, label: 'S'}, {az: 270, label: 'W'}];
+            directions.forEach(d => {
+                const angle = (d.az - 90) * Math.PI / 180;
+                ctx.beginPath();
+                ctx.moveTo(centerX, centerY);
+                ctx.lineTo(centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius);
+                ctx.stroke();
+
+                // Label
+                ctx.fillStyle = 'rgba(255,255,255,0.6)';
+                ctx.font = '12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                const labelR = radius + 15;
+                ctx.fillText(d.label, centerX + Math.cos(angle) * labelR, centerY + Math.sin(angle) * labelR);
+            });
+
+            // Draw generated optimal points (dimmer, as suggestions)
+            generatedPoints.forEach(pt => {
+                const r = radius * (90 - pt.alt) / 90;
+                const angle = (pt.az - 90) * Math.PI / 180;
+                const x = centerX + Math.cos(angle) * r;
+                const y = centerY + Math.sin(angle) * r;
+
+                ctx.beginPath();
+                ctx.arc(x, y, 6, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(168, 85, 247, 0.3)';
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(168, 85, 247, 0.6)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            });
+
+            // Draw alignment points from model
+            modelData.points?.forEach((pt, i) => {
+                // Convert RA/Dec to Alt/Az for display
+                // For now, if we have raw coordinates, plot them
+                // The mount returns mount coords, we'd need to convert
+                let alt = pt.mountDec || 45; // Placeholder - need proper conversion
+                let az = (pt.mountRA || 0) * 15; // RA hours to degrees, rough approximation
+
+                // If point has error data, color by error magnitude
+                let color = '#22c55e'; // Green for good
+                if (pt.error) {
+                    if (pt.error > 60) color = '#ef4444'; // Red for bad
+                    else if (pt.error > 30) color = '#f59e0b'; // Orange for medium
+                }
+
+                const r = radius * (90 - Math.max(0, Math.min(90, alt))) / 90;
+                const angle = (az - 90) * Math.PI / 180;
+                const x = centerX + Math.cos(angle) * r;
+                const y = centerY + Math.sin(angle) * r;
+
+                // Store position for tooltip
+                pt._x = x;
+                pt._y = y;
+
+                ctx.beginPath();
+                ctx.arc(x, y, 8, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Point number
+                ctx.fillStyle = '#000';
+                ctx.font = 'bold 9px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(pt.index || (i + 1), x, y);
+            });
+
+            // Zenith marker
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, 3, 0, Math.PI * 2);
+            ctx.fillStyle = 'var(--cyan)';
+            ctx.fill();
+
+            // Setup mouse events for tooltip
+            canvas.onmousemove = (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                let found = null;
+                modelData.points?.forEach(pt => {
+                    const dx = mx - (pt._x || 0);
+                    const dy = my - (pt._y || 0);
+                    if (Math.sqrt(dx*dx + dy*dy) < 12) {
+                        found = pt;
+                    }
+                });
+
+                if (found) {
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = (mx + 15) + 'px';
+                    tooltip.style.top = (my - 10) + 'px';
+                    tooltip.innerHTML = '<strong>Point ' + found.index + '</strong><br>' +
+                        'RA: ' + (found.mountRA?.toFixed(4) || '--') + '<br>' +
+                        'Dec: ' + (found.mountDec?.toFixed(4) || '--') + '<br>' +
+                        (found.error ? 'Error: ' + found.error.toFixed(1) + '"' : '');
+                } else {
+                    tooltip.style.display = 'none';
+                }
+            };
+
+            canvas.onmouseleave = () => {
+                tooltip.style.display = 'none';
+            };
+        }
+
+        function generateOptimalPoints() {
+            const count = parseInt(document.getElementById('targetPointCount').value) || 30;
+            const minAlt = parseInt(document.getElementById('minAltitude').value) || 20;
+            const listEl = document.getElementById('generatedPointsList');
+
+            generatedPoints = [];
+
+            // Fibonacci sphere distribution adapted for hemisphere above horizon
+            // More points near horizon (where refraction is stronger)
+            const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+            for (let i = 0; i < count; i++) {
+                // Use modified distribution - more points at lower altitudes
+                const t = i / (count - 1);
+                // Altitude: bias toward lower altitudes using sqrt
+                const alt = minAlt + (90 - minAlt) * Math.sqrt(t);
+
+                // Azimuth: golden angle spiral
+                const az = ((i * goldenAngle * 180 / Math.PI) % 360 + 360) % 360;
+
+                generatedPoints.push({ alt, az, index: i + 1 });
+            }
+
+            // Sort by altitude for display
+            generatedPoints.sort((a, b) => a.alt - b.alt);
+
+            // Update list
+            listEl.innerHTML = '<div style="margin-bottom: 5px; color: var(--green);">' + count + ' points generated</div>' +
+                '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; font-family: monospace; font-size: 0.65rem;">' +
+                generatedPoints.slice(0, 15).map(p =>
+                    '<span>Alt:' + p.alt.toFixed(0) + ' Az:' + p.az.toFixed(0) + '</span>'
+                ).join('') +
+                (count > 15 ? '<span>... +' + (count - 15) + ' more</span>' : '') +
+                '</div>';
+
+            renderSkyMap();
+        }
+        window.generateOptimalPoints = generateOptimalPoints;
+
+        async function deleteAlignmentModel() {
+            if (!confirm('Delete the current alignment model? This cannot be undone.')) return;
+
+            try {
+                const resp = await fetch('/api/mount/model', { method: 'DELETE' });
+                const data = await resp.json();
+                if (data.success) {
+                    alert('Alignment model deleted');
+                    refreshModelData();
+                } else {
+                    alert('Delete failed: ' + (data.message || 'Unknown error'));
+                }
+            } catch (e) {
+                alert('Delete error: ' + e.message);
+            }
+        }
+        window.deleteAlignmentModel = deleteAlignmentModel;
+
+        // Initial load of model data
+        refreshModelData();
+        // Refresh model data every 30 seconds
+        setInterval(refreshModelData, 30000);
 
         // ========================================
         // Roof Control Functions
@@ -5193,6 +5523,131 @@ const server = http.createServer(async (req, res) => {
             safe: safe,
             reason: safe ? 'Target is above minimum altitude' : `Target too low (${altaz.altitude.toFixed(1)}° < ${minAlt}°)`
         }));
+        return;
+    }
+
+    // ========================================================================
+    // MOUNT MODELING API ENDPOINTS (Direct LX200 connection)
+    // ========================================================================
+
+    // GET /api/mount/model - Get current alignment model summary
+    if (url.pathname === '/api/mount/model' && req.method === 'GET') {
+        try {
+            const count = await mountModeling.getAlignmentStarCount();
+            const modelCount = await mountModeling.getModelCount();
+            const temp = await mountModeling.getRefractionTemp();
+            const pressure = await mountModeling.getRefractionPressure();
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                alignmentStars: count,
+                savedModels: modelCount,
+                refraction: {
+                    temperature: temp,
+                    pressure: pressure
+                }
+            }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // GET /api/mount/model/points - Get all alignment points
+    if (url.pathname === '/api/mount/model/points' && req.method === 'GET') {
+        try {
+            const model = await mountModeling.getAllAlignmentPoints();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                count: model.count,
+                points: model.points
+            }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // DELETE /api/mount/model - Delete current alignment model
+    if (url.pathname === '/api/mount/model' && req.method === 'DELETE') {
+        try {
+            const result = await mountModeling.deleteAlignment();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: result,
+                message: result ? 'Alignment model deleted' : 'Failed to delete model'
+            }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // GET /api/mount/model/test - Test direct connection to mount
+    if (url.pathname === '/api/mount/model/test' && req.method === 'GET') {
+        try {
+            const result = await mountModeling.testConnection();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ connected: false, error: e.message }));
+        }
+        return;
+    }
+
+    // POST /api/mount/model/refraction - Set refraction parameters
+    if (url.pathname === '/api/mount/model/refraction' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(body);
+                let results = {};
+
+                if (data.temperature !== undefined) {
+                    results.temperature = await mountModeling.setRefractionTemp(data.temperature);
+                }
+                if (data.pressure !== undefined) {
+                    results.pressure = await mountModeling.setRefractionPressure(data.pressure);
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, results }));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // POST /api/mount/model/sync-mode - Set sync mode (0=offset, 1=refine model)
+    if (url.pathname === '/api/mount/model/sync-mode' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(body);
+                const mode = data.mode === 1 || data.mode === 'refine' ? 1 : 0;
+                const result = await mountModeling.setSyncMode(mode);
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    success: result,
+                    mode: mode,
+                    description: mode === 1 ? 'Syncs will refine alignment model' : 'Syncs will apply offset only'
+                }));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: e.message }));
+            }
+        });
         return;
     }
 
