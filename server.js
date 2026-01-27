@@ -581,228 +581,205 @@ function calculateCFZ(profile) {
     return Math.round(cfzMicrons / micronsPerStep);
 }
 
-// Automated profiling routine
+// Automated profiling routine - FAST VERSION
+// Targets ~8-12 minutes instead of 60+ minutes
+// Uses coarse-to-fine approach with fewer trials
 async function runProfilingRoutine(profile) {
     const scopeDefaults = SCOPE_DEFAULTS[profile.scopeType] || SCOPE_DEFAULTS.Refractor;
+
+    // Typical backlash values by scope type (much smaller than maxBacklash)
+    const TYPICAL_BACKLASH = {
+        Refractor: 40,
+        Newtonian: 50,
+        SCT: 150,
+        RC: 80
+    };
+    const typicalBacklash = TYPICAL_BACKLASH[profile.scopeType] || 50;
+
+    // Fast profiling uses shorter exposures and larger increments
+    const FAST_EXPOSURE = 1.5;  // 1.5 second exposures for backlash detection
+    const COARSE_INCREMENT = 50; // Start with big steps
+    const FINE_INCREMENT = 15;   // Refine with smaller steps
+    const SETTLE_TIME = 800;     // Shorter settle time
 
     profilingState = {
         active: true,
         phase: 'initializing',
         progress: 0,
-        message: 'Starting profiling routine...',
+        message: 'Starting fast profiling routine...',
         measurements: [],
-        error: null
+        error: null,
+        estimatedMinutes: 10
     };
 
-    log(`[Focuser] Starting profiling for ${profile.name} (${profile.scopeType})`);
+    log(`[Focuser] Starting FAST profiling for ${profile.name} (${profile.scopeType})`);
+    log(`[Focuser] Typical backlash for ${profile.scopeType}: ~${typicalBacklash} steps`);
 
     try {
-        // ---- Phase 0: Slew to star-rich field ----
+        // ---- Phase 0: Quick slew to star field (or use current position) ----
         profilingState.phase = 'slewing';
-        profilingState.progress = 2;
-        profilingState.message = 'Finding star-rich field...';
-        log('[Focuser] Phase 0: Slewing to star-rich field');
+        profilingState.progress = 5;
+        profilingState.message = 'Finding star field...';
 
-        // Get ranked targets and find one that's up with good altitude
         const rankedTargets = getRankedTargets(OBSERVATORY.latitude, OBSERVATORY.longitude);
-
-        // Filter for targets above 40° altitude, prefer star clusters or galactic targets
-        let targetField = null;
-        for (const target of rankedTargets) {
-            if (target.altitude >= 40) {
-                // Prefer open clusters (good star density) or any target above 40°
-                targetField = target;
-                break;
-            }
-        }
-
-        if (!targetField) {
-            // Fallback: use the highest target available above 30°
-            targetField = rankedTargets.find(t => t.altitude >= 30);
-        }
+        const targetField = rankedTargets.find(t => t.altitude >= 35);
 
         if (targetField) {
             log(`[Focuser] Slewing to ${targetField.name} (Alt: ${targetField.altitude.toFixed(1)}°)`);
             profilingState.message = `Slewing to ${targetField.name}...`;
-
             await indi.mountSlew(targetField.ra_decimal, targetField.dec_decimal);
-            log(`[Focuser] Arrived at ${targetField.name}`);
         } else {
-            log('[Focuser] Warning: No suitable target found above 30°, using current position');
+            log('[Focuser] Using current position (no suitable target above 35°)');
         }
 
-        profilingState.progress = 8;
+        profilingState.progress = 10;
 
         // Get current focuser position
         const focusState = indi.getState();
         const startPosition = focusState['Pegasus FocusCube']?.position || 25000;
         let currentPosition = startPosition;
 
-        // ---- Phase 1: Rough Focus (find stars) ----
+        // ---- Phase 1: Quick rough focus (optional - skip if already focused) ----
         profilingState.phase = 'rough_focus';
-        profilingState.progress = 10;
-        profilingState.message = 'Finding rough focus...';
-        log('[Focuser] Phase 1: Finding rough focus');
+        profilingState.progress = 15;
+        profilingState.message = 'Quick focus check...';
+        log('[Focuser] Phase 1: Quick focus verification');
 
-        // Scan through focus range to find stars
-        const scanStep = scopeDefaults.stepSize * 5; // Coarse steps
-        const scanRange = 3000;
-        const scanStart = startPosition - scanRange / 2;
-        let bestHFR = 999;
-        let bestPos = startPosition;
+        // Take a single exposure to verify we have stars
+        await indi.cameraExpose('camera_main', FAST_EXPOSURE);
+        // In production: check if stars detected, if not do a quick scan
+        // For now, assume current position is acceptable
 
-        for (let pos = scanStart; pos <= scanStart + scanRange && profilingState.active; pos += scanStep) {
-            await indi.focuserMove(pos);
-            await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
+        profilingState.progress = 20;
 
-            // Take short exposure
-            await indi.cameraExpose('camera_main', 2);
-
-            // Simulated HFR measurement (in production, would analyze actual image)
-            const distFromOptimal = Math.abs(pos - startPosition);
-            const simulatedHFR = 2.0 + (distFromOptimal / 1000) * 4;
-
-            if (simulatedHFR < bestHFR) {
-                bestHFR = simulatedHFR;
-                bestPos = pos;
-            }
-
-            profilingState.progress = 10 + ((pos - scanStart) / scanRange) * 15;
-        }
-
-        if (!profilingState.active) throw new Error('Profiling aborted');
-
-        // Move to best rough focus
-        await indi.focuserMove(bestPos);
-        currentPosition = bestPos;
-        log(`[Focuser] Rough focus found at position ${bestPos}`);
-
-        // ---- Phase 2: Measure Inward-to-Outward Backlash ----
+        // ---- Phase 2: FAST Backlash IN→OUT (coarse pass only) ----
         profilingState.phase = 'backlash_in_to_out';
-        profilingState.progress = 30;
-        profilingState.message = 'Measuring inward-to-outward backlash...';
-        log('[Focuser] Phase 2: Measuring inward-to-outward backlash');
+        profilingState.progress = 25;
+        profilingState.message = 'Measuring inward→outward backlash (fast)...';
+        log('[Focuser] Phase 2: Fast backlash measurement IN→OUT');
 
-        const backlashMeasurements = { inToOut: [], outToIn: [] };
+        // Move inward first
+        const inwardPos = currentPosition - scopeDefaults.testDistance;
+        await indi.focuserMove(inwardPos);
+        await new Promise(r => setTimeout(r, SETTLE_TIME));
 
-        for (let trial = 0; trial < 3 && profilingState.active; trial++) {
-            // Move inward
-            const inwardPos = currentPosition - scopeDefaults.testDistance;
-            await indi.focuserMove(inwardPos);
-            await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
+        // Reference exposure
+        await indi.cameraExpose('camera_main', FAST_EXPOSURE);
+        const refHFR1 = 2.5; // Simulated
 
-            // Take reference exposure
-            await indi.cameraExpose('camera_main', profile.exposureTime);
-            // Simulated reference HFR
-            const refHFR = 2.5;
+        // Coarse search: move outward in big steps (scan up to 2× typical backlash)
+        let inToOutBacklash = 0;
+        const maxSearch = Math.min(typicalBacklash * 2.5, scopeDefaults.maxBacklash);
 
-            // Start moving outward in small increments until HFR changes
-            let deadSteps = 0;
-            const increment = 15;
-            for (let step = 0; step < scopeDefaults.maxBacklash && profilingState.active; step += increment) {
-                await indi.focuserMove(inwardPos + step);
-                await new Promise(r => setTimeout(r, 500));
-                await indi.cameraExpose('camera_main', profile.exposureTime);
+        for (let step = 0; step <= maxSearch && profilingState.active; step += COARSE_INCREMENT) {
+            await indi.focuserMove(inwardPos + step);
+            await new Promise(r => setTimeout(r, SETTLE_TIME));
+            await indi.cameraExpose('camera_main', FAST_EXPOSURE);
 
-                // Simulated HFR check
-                const currentHFR = 2.5 + (step > 50 ? (step - 50) / 200 : 0);
-                if (Math.abs(currentHFR - refHFR) / refHFR > 0.05) {
-                    deadSteps = step;
-                    break;
-                }
-                deadSteps = step;
-            }
+            // Simulated HFR change detection
+            const currentHFR = 2.5 + (step > typicalBacklash * 0.8 ? (step - typicalBacklash * 0.8) / 150 : 0);
 
-            backlashMeasurements.inToOut.push(deadSteps);
-            profilingState.progress = 30 + ((trial + 1) / 3) * 10;
-        }
+            profilingState.measurements.push({
+                direction: 'in_to_out',
+                step: step,
+                hfr: currentHFR
+            });
 
-        if (!profilingState.active) throw new Error('Profiling aborted');
-
-        // ---- Phase 3: Measure Outward-to-Inward Backlash ----
-        profilingState.phase = 'backlash_out_to_in';
-        profilingState.progress = 45;
-        profilingState.message = 'Measuring outward-to-inward backlash...';
-        log('[Focuser] Phase 3: Measuring outward-to-inward backlash');
-
-        // Reset position
-        await indi.focuserMove(currentPosition);
-        await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
-
-        for (let trial = 0; trial < 3 && profilingState.active; trial++) {
-            // Move outward
-            const outwardPos = currentPosition + scopeDefaults.testDistance;
-            await indi.focuserMove(outwardPos);
-            await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
-
-            // Take reference exposure
-            await indi.cameraExpose('camera_main', profile.exposureTime);
-            const refHFR = 2.5;
-
-            // Start moving inward in small increments
-            let deadSteps = 0;
-            const increment = 15;
-            for (let step = 0; step < scopeDefaults.maxBacklash && profilingState.active; step += increment) {
-                await indi.focuserMove(outwardPos - step);
-                await new Promise(r => setTimeout(r, 500));
-                await indi.cameraExpose('camera_main', profile.exposureTime);
-
-                const currentHFR = 2.5 + (step > 70 ? (step - 70) / 200 : 0);
-                if (Math.abs(currentHFR - refHFR) / refHFR > 0.05) {
-                    deadSteps = step;
-                    break;
-                }
-                deadSteps = step;
-            }
-
-            backlashMeasurements.outToIn.push(deadSteps);
-            profilingState.progress = 45 + ((trial + 1) / 3) * 10;
-        }
-
-        if (!profilingState.active) throw new Error('Profiling aborted');
-
-        // Calculate median backlash values
-        const median = arr => {
-            const sorted = [...arr].sort((a, b) => a - b);
-            return sorted[Math.floor(sorted.length / 2)];
-        };
-
-        const inToOutBacklash = median(backlashMeasurements.inToOut);
-        const outToInBacklash = median(backlashMeasurements.outToIn);
-
-        log(`[Focuser] Backlash measured: IN→OUT=${inToOutBacklash}, OUT→IN=${outToInBacklash}`);
-
-        // ---- Phase 4: Determine optimal step size ----
-        profilingState.phase = 'step_size';
-        profilingState.progress = 65;
-        profilingState.message = 'Determining optimal step size...';
-        log('[Focuser] Phase 4: Determining step size');
-
-        // Return to focus
-        await indi.focuserMove(currentPosition);
-        await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
-
-        // Find minimum step that produces measurable HFR change
-        let optimalStepSize = scopeDefaults.stepSize;
-        for (const testStep of [25, 50, 75, 100, 150, 200]) {
-            if (!profilingState.active) break;
-
-            await indi.cameraExpose('camera_main', profile.exposureTime);
-            const hfr1 = 2.0; // Simulated
-
-            await indi.focuserMove(currentPosition + testStep);
-            await new Promise(r => setTimeout(r, scopeDefaults.settleTime));
-            await indi.cameraExpose('camera_main', profile.exposureTime);
-            const hfr2 = 2.0 + testStep / 500; // Simulated
-
-            if (Math.abs(hfr2 - hfr1) > 0.1) {
-                optimalStepSize = testStep;
-                log(`[Focuser] Optimal step size found: ${testStep}`);
+            if (Math.abs(currentHFR - refHFR1) / refHFR1 > 0.04) {
+                // Found change - backlash is somewhere in previous coarse step
+                inToOutBacklash = Math.max(0, step - COARSE_INCREMENT / 2);
+                log(`[Focuser] IN→OUT backlash detected around ${inToOutBacklash} steps`);
                 break;
             }
+            inToOutBacklash = step;
 
-            await indi.focuserMove(currentPosition);
+            profilingState.progress = 25 + (step / maxSearch) * 15;
         }
+
+        if (!profilingState.active) throw new Error('Profiling aborted');
+        profilingState.progress = 45;
+
+        // ---- Phase 3: FAST Backlash OUT→IN (coarse pass only) ----
+        profilingState.phase = 'backlash_out_to_in';
+        profilingState.progress = 50;
+        profilingState.message = 'Measuring outward→inward backlash (fast)...';
+        log('[Focuser] Phase 3: Fast backlash measurement OUT→IN');
+
+        // Move outward
+        const outwardPos = currentPosition + scopeDefaults.testDistance;
+        await indi.focuserMove(outwardPos);
+        await new Promise(r => setTimeout(r, SETTLE_TIME));
+
+        // Reference exposure
+        await indi.cameraExpose('camera_main', FAST_EXPOSURE);
+        const refHFR2 = 2.5;
+
+        // Coarse search inward
+        let outToInBacklash = 0;
+
+        for (let step = 0; step <= maxSearch && profilingState.active; step += COARSE_INCREMENT) {
+            await indi.focuserMove(outwardPos - step);
+            await new Promise(r => setTimeout(r, SETTLE_TIME));
+            await indi.cameraExpose('camera_main', FAST_EXPOSURE);
+
+            const currentHFR = 2.5 + (step > typicalBacklash ? (step - typicalBacklash) / 150 : 0);
+
+            profilingState.measurements.push({
+                direction: 'out_to_in',
+                step: step,
+                hfr: currentHFR
+            });
+
+            if (Math.abs(currentHFR - refHFR2) / refHFR2 > 0.04) {
+                outToInBacklash = Math.max(0, step - COARSE_INCREMENT / 2);
+                log(`[Focuser] OUT→IN backlash detected around ${outToInBacklash} steps`);
+                break;
+            }
+            outToInBacklash = step;
+
+            profilingState.progress = 50 + (step / maxSearch) * 15;
+        }
+
+        if (!profilingState.active) throw new Error('Profiling aborted');
+
+        // Add safety margin (10%) to measured backlash
+        inToOutBacklash = Math.round(inToOutBacklash * 1.1);
+        outToInBacklash = Math.round(outToInBacklash * 1.1);
+
+        log(`[Focuser] Backlash measured: IN→OUT=${inToOutBacklash}, OUT→IN=${outToInBacklash}`);
+        profilingState.progress = 70;
+
+        // ---- Phase 4: Step size (use smart default based on scope type) ----
+        profilingState.phase = 'step_size';
+        profilingState.progress = 75;
+        profilingState.message = 'Validating step size...';
+        log('[Focuser] Phase 4: Step size validation');
+
+        // Return to focus area
+        await indi.focuserMove(currentPosition);
+        await new Promise(r => setTimeout(r, SETTLE_TIME));
+
+        // Quick validation: just test the default step size
+        let optimalStepSize = scopeDefaults.stepSize;
+
+        await indi.cameraExpose('camera_main', FAST_EXPOSURE);
+        const hfr1 = 2.0;
+
+        await indi.focuserMove(currentPosition + optimalStepSize);
+        await new Promise(r => setTimeout(r, SETTLE_TIME));
+        await indi.cameraExpose('camera_main', FAST_EXPOSURE);
+        const hfr2 = 2.0 + optimalStepSize / 500;
+
+        // If default step produces measurable change, it's good
+        // Otherwise try a larger step
+        if (Math.abs(hfr2 - hfr1) < 0.08) {
+            optimalStepSize = Math.round(optimalStepSize * 1.5);
+            log(`[Focuser] Step size increased to ${optimalStepSize} for better HFR change`);
+        } else {
+            log(`[Focuser] Default step size ${optimalStepSize} validated`);
+        }
+
+        profilingState.progress = 85;
 
         if (!profilingState.active) throw new Error('Profiling aborted');
 
@@ -818,6 +795,7 @@ async function runProfilingRoutine(profile) {
         profile.stepSize = optimalStepSize;
         profile.cfzSteps = calculateCFZ(profile);
         profile.lastModified = new Date().toISOString();
+        profile.profilingMethod = 'fast';  // Mark as fast-profiled
 
         saveProfile(profile);
 
@@ -831,10 +809,10 @@ async function runProfilingRoutine(profile) {
 
         profilingState.phase = 'complete';
         profilingState.progress = 100;
-        profilingState.message = 'Profiling complete!';
+        profilingState.message = 'Fast profiling complete!';
         profilingState.active = false;
 
-        log(`[Focuser] Profiling complete for ${profile.name}`);
+        log(`[Focuser] FAST profiling complete for ${profile.name}`);
         log(`[Focuser] Results: Backlash IN→OUT=${inToOutBacklash}, OUT→IN=${outToInBacklash}, Step=${optimalStepSize}`);
 
     } catch (err) {
